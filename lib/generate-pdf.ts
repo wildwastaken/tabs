@@ -1,6 +1,6 @@
 // lib/generate-pdf.ts
 import pdfMake from "pdfmake/build/pdfmake";
-// @ts-expect-error // comment
+// @ts-expect-error: vfsFonts has no type definitions
 import vfsFonts from "./vfs_fonts";
 
 pdfMake.vfs = vfsFonts.pdfMake.vfs;
@@ -20,25 +20,27 @@ type ProcessedChord = string | { text: ChordSegment[] };
 function processChords(chords: string): ProcessedChord[] {
   // Remove [tab] markers
   const formattedChords = chords.replace(/\[tab\]/g, "").replace(/\[\/tab\]/g, "");
-  
-  // Split the input into lines and then split each line by [ch] markers.
   const lines = formattedChords.split(/\n/g).map((line) => line.split(/\[ch\]|\[\/ch\]/g));
-
-  // Process each line to wrap chord parts in an object.
   const processedChords: ProcessedChord[] = lines.map((segments) => {
     if (segments.length === 1) {
-      // No chord markers – return the plain string.
       return segments[0];
     } else {
-      // For alternating segments, wrap every odd-index segment as a bold chord.
-      const processedSegments: ChordSegment[] = segments.map((segment, index) => {
-        return isOdd(index) ? { text: segment, bold: true } : segment;
-      });
+      const processedSegments: ChordSegment[] = segments.map((segment, index) =>
+        isOdd(index) ? { text: segment, bold: true } : segment
+      );
       return { text: processedSegments };
     }
   });
-
   return processedChords;
+}
+
+// Define an interface for pdfMake's document generator that includes getDataUrl
+interface PdfDocGenerator {
+  getDataUrl(callback: (dataUrl: string) => void): void;
+}
+
+interface ExtendedPdfDocGenerator extends PdfDocGenerator {
+  getBlob(callback: (blob: Blob) => void): void; // Include any additional methods
 }
 
 export default function generatePDF(
@@ -46,7 +48,7 @@ export default function generatePDF(
   song: string,
   chords: string,
   fontSize: number
-): Promise<{ url: string; filename: string }> {
+): Promise<{ dataUrl: string; filename: string }> {
   const processedChords = processChords(chords);
 
   const docDefinition = {
@@ -81,20 +83,16 @@ export default function generatePDF(
     ): boolean => {
       const isLastOnPage = followingNodesOnPage.length === 0;
       const isNotLastOfAll = nodesOnNextPage.length !== 0;
-      return (
-        isLastOnPage &&
-        isNotLastOfAll &&
-        Array.isArray(currentNode.text)
-      );
+      return isLastOnPage && isNotLastOfAll && Array.isArray(currentNode.text);
     },
   };
 
   return new Promise((resolve) => {
     const filename = `${artist}-${song}.pdf`;
-
-    pdfMake.createPdf(docDefinition).getBlob((blob: Blob) => {
-      const url = URL.createObjectURL(blob);
-      resolve({ url, filename });
+    // Cast to ExtendedPdfDocGenerator to include getDataUrl
+    const pdfDocGenerator = pdfMake.createPdf(docDefinition) as ExtendedPdfDocGenerator;
+    pdfDocGenerator.getDataUrl((dataUrl: string) => {
+      resolve({ dataUrl, filename });
     });
   });
 }

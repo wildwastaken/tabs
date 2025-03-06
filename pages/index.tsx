@@ -125,20 +125,18 @@ export default function ChordTransposer() {
     const updatePDF = async () => {
       if (artist && song && transposedChords) {
         try {
-          const { url, filename } = await generatePDF(artist, song, transposedChords, fontSize)
-          setPdfUrl(`${url}#view=FitH&zoom=20&filename=${filename} - ${artist}`)
+          const { dataUrl } = await generatePDF(artist, song, transposedChords, fontSize);
+          setPdfUrl(dataUrl);
         } catch (err) {
-          console.error("Failed to generate PDF:", err)
-          setError("Failed to generate PDF preview")
+          console.error("Failed to generate PDF:", err);
+          setError("Failed to generate PDF preview");
         }
       }
-    }
-
-    if (transposedChords) {
-      updatePDF()
-    }
-  }, [artist, song, transposedChords, fontSize])
-
+    };
+  
+    updatePDF();
+  }, [artist, song, transposedChords, fontSize]);
+  
   // Fix 5: Remove halftoneStyle from the dependency array
   useEffect(() => {
     if (!chords) return
