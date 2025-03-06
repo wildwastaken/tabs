@@ -56,7 +56,7 @@ export default function ChordTransposer() {
   const [song, setSong] = useState("")
   // Define halftoneStyle constant since it's referenced but not defined
   const halftoneStyle = "FLATS" // Default value
-  const [simplify, setSimplify] = useState(false)
+  const [simplify] = useState(false)
   const [transposeStep, setTransposeStep] = useState(0)
   const [transposedChords, setTransposedChords] = useState("")
   const [fontSize, setFontSize] = useState(10)
