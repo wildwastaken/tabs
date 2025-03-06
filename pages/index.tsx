@@ -126,7 +126,7 @@ export default function ChordTransposer() {
       if (artist && song && transposedChords) {
         try {
           const { url, filename } = await generatePDF(artist, song, transposedChords, fontSize)
-          setPdfUrl(`${url}#view=FitH&zoom=20&filename=${encodeURIComponent(`${filename} - ${artist}`)}`)
+          setPdfUrl(`${url}#view=FitH&zoom=20&filename=${filename} - ${artist}`)
         } catch (err) {
           console.error("Failed to generate PDF:", err)
           setError("Failed to generate PDF preview")
