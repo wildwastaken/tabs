@@ -15,17 +15,18 @@ export default async function generatePDF(
   chords: string,
   fontSize: number
 ): Promise<{ dataUrl: string; filename: string }> {
-  const pdfMake = (await import("pdfmake/build/pdfmake")).default;
-  const pdfFonts = (await import("pdfmake/build/vfs_fonts")).default;
-  pdfMake.vfs = pdfFonts.pdfMake.vfs;
+  // Dynamically load pdfMake so this only runs in the browser
+  const pdfMakeModule = await import("pdfmake/build/pdfmake");
+  const pdfMake = pdfMakeModule.default || pdfMakeModule;
 
+  // Configure custom fonts using the locally hosted font files
   pdfMake.fonts = {
     RobotoMono: {
-      normal: "RobotoMono-Regular.ttf",
-      bold: "RobotoMono-Bold.ttf"
+      normal: "https://wildwastaken.github.io/gifting/Roboto_Mono/RobotoMono-Regular.ttf",
+      bold: "https://wildwastaken.github.io/gifting/Roboto_Mono/RobotoMono-Bold.ttf"
     }
   };
-
+  
   const processedChords = processChords(chords);
 
   const docDefinition = {
@@ -53,8 +54,17 @@ export default async function generatePDF(
         margin: [0, 0, 0, 10],
       },
     },
+    pageBreakBefore: (
+      currentNode: { text?: unknown },
+      followingNodesOnPage: unknown[],
+      nodesOnNextPage: unknown[]
+    ): boolean => {
+      const isLastOnPage = followingNodesOnPage.length === 0;
+      const isNotLastOfAll = nodesOnNextPage.length !== 0;
+      return isLastOnPage && isNotLastOfAll && Array.isArray(currentNode.text);
+    },
   };
-  
+
   return new Promise((resolve) => {
     const filename = `${artist}-${song}.pdf`;
     const pdfDocGenerator = pdfMake.createPdf(docDefinition) as {
