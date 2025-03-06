@@ -25,7 +25,7 @@ import {
   Music2,
 } from "lucide-react"
 
-const corsURI = process.env.NEXT_PUBLIC_CORS_SERVER
+const corsURI = 'https://api.codetabs.com/v1/proxy/?quest='
 
 // Fix 1: Replace 'any' with proper type definitions
 interface ObjectWithKey {
@@ -322,23 +322,31 @@ export default function ChordTransposer() {
 
                     <Separator orientation="vertical" className="h-12" />
 
-                    <div className="flex flex-col">
-                      {/* Commenting out the notation section */}
-                      {/* <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Notation</div>
-                      <RadioGroup value={halftoneStyle} onValueChange={setHalftoneStyle} className="flex space-x-4">
-                        <div className="flex items-center space-x-2">
-                          <RadioGroupItem value="SHARPS" id="sharps" />
-                          <Label htmlFor="sharps" className="cursor-pointer">
-                            ♯ Sharps
-                          </Label>
+                    <div className="flex flex-col items-center">
+                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Font Size</div>
+                      <div className="flex items-center">
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          onClick={() => setFontSize((prev) => Math.max(prev - 1, 6))}
+                          disabled={fontSize <= 6}
+                          className="h-8 w-8"
+                        >
+                          <ChevronDown className="h-4 w-4" />
+                        </Button>
+                        <div className="w-10 text-center font-mono font-bold text-primary">
+                          {fontSize}pt
                         </div>
-                        <div className="flex items-center space-x-2">
-                          <RadioGroupItem value="FLATS" id="flats" />
-                          <Label htmlFor="flats" className="cursor-pointer">
-                            ♭ Flats
-                          </Label>
-                        </div>
-                      </RadioGroup> */}
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          onClick={() => setFontSize((prev) => Math.min(prev + 1, 20))}
+                          disabled={fontSize >= 20}
+                          className="h-8 w-8"
+                        >
+                          <ChevronUp className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 </CardContent>
@@ -464,7 +472,7 @@ export default function ChordTransposer() {
                           <span>20pt</span>
                         </div>
                       </div>
-
+{/* 
                       <div className="flex items-center space-x-2 pt-2">
                         <Checkbox
                           id="simplify"
@@ -477,7 +485,7 @@ export default function ChordTransposer() {
                             Remove extended, suspended, and added notes
                           </p>
                         </Label>
-                      </div>
+                      </div> */}
                     </div>
                   </CardContent>
                 </Card>
