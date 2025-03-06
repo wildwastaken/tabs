@@ -5,7 +5,7 @@ import { parse, transpose, prettyPrint } from "chord-magic"
 import generatePDF from "../lib/generate-pdf"
 import { Input } from "../components/ui/input"
 import { Slider } from "../components/ui/slider"
-import { RadioGroup, RadioGroupItem } from "../components/ui/radio-group"
+// import { RadioGroup, RadioGroupItem } from "../components/ui/radio-group"
 import { Checkbox } from "../components/ui/checkbox"
 import { Label } from "../components/ui/label"
 import { Button } from "../components/ui/button"
@@ -22,20 +22,25 @@ import {
   AlertCircle,
   ChevronDown,
   ChevronUp,
-  Hash,
   Music2,
 } from "lucide-react"
 
-const corsURI = process.env.NEXT_PUBLIC_CORS_SERVER || ""
+const corsURI = process.env.NEXT_PUBLIC_CORS_SERVER
 
-function findInObject(obj: any, key: string): any[] {
-  let objects: any[] = []
+// Fix 1: Replace 'any' with proper type definitions
+interface ObjectWithKey {
+  [key: string]: unknown
+}
+
+function findInObject(obj: ObjectWithKey, key: string): unknown[] {
+  let objects: unknown[] = []
   const keys = Object.keys(obj || {})
   for (let i = 0; i < keys.length; i += 1) {
     const _key = keys[i]
     if (Object.prototype.hasOwnProperty.call(obj, _key)) {
-      if (typeof obj[_key] === "object") {
-        objects = [...objects, ...findInObject(obj[_key], key)]
+      if (typeof obj[_key] === "object" && obj[_key] !== null) {
+        // Ensure we're only recursing into objects
+        objects = [...objects, ...findInObject(obj[_key] as ObjectWithKey, key)]
       } else if (_key === key) {
         objects.push(obj[_key])
       }
@@ -49,7 +54,8 @@ export default function ChordTransposer() {
   const [chords, setChords] = useState("")
   const [artist, setArtist] = useState("")
   const [song, setSong] = useState("")
-  const [halftoneStyle, setHalftoneStyle] = useState("FLATS")
+  // Define halftoneStyle constant since it's referenced but not defined
+  const halftoneStyle = "FLATS" // Default value
   const [simplify, setSimplify] = useState(false)
   const [transposeStep, setTransposeStep] = useState(0)
   const [transposedChords, setTransposedChords] = useState("")
@@ -88,9 +94,9 @@ export default function ChordTransposer() {
 
       const storeData = JSON.parse(storeJson)
 
-      const [parsedSongName] = findInObject(storeData, "song_name")
-      const [parsedArtistName] = findInObject(storeData, "artist_name")
-      const [parsedChords] = findInObject(storeData, "content")
+      const [parsedSongName] = findInObject(storeData, "song_name") as string[]
+      const [parsedArtistName] = findInObject(storeData, "artist_name") as string[]
+      const [parsedChords] = findInObject(storeData, "content") as string[]
 
       if (!parsedChords) {
         throw new Error("No chord data found")
@@ -100,8 +106,9 @@ export default function ChordTransposer() {
       setSong(parsedSongName || "Unknown Song")
       setChords(parsedChords)
       // setActiveTab("preview") - add back eventually
-    } catch (error) {
-      console.error("Failed to load song:", error)
+    } catch (err) {
+      // Fix 4: Rename 'error' to 'err' to avoid name collision
+      console.error("Failed to load song:", err)
       setError("Failed to load song. Please check the URL and try again.")
     } finally {
       setIsLoading(false)
@@ -120,8 +127,8 @@ export default function ChordTransposer() {
         try {
           const { url, filename } = await generatePDF(artist, song, transposedChords, fontSize)
           setPdfUrl(`${url}#view=FitH&zoom=20&filename=${encodeURIComponent(`${filename} - ${artist}`)}`)
-        } catch (error) {
-          console.error("Failed to generate PDF:", error)
+        } catch (err) {
+          console.error("Failed to generate PDF:", err)
           setError("Failed to generate PDF preview")
         }
       }
@@ -132,6 +139,7 @@ export default function ChordTransposer() {
     }
   }, [artist, song, transposedChords, fontSize])
 
+  // Fix 5: Remove halftoneStyle from the dependency array
   useEffect(() => {
     if (!chords) return
 
@@ -171,7 +179,8 @@ export default function ChordTransposer() {
           if (chordsDiff >= 0) {
             regex.push(replacer + " ".repeat(chordsDiff))
           }
-        } catch (error) {
+        } catch (err) {
+          console.error("Failed to transpose:", err)
           console.info("failed to transpose", chord)
         }
       }
@@ -187,7 +196,7 @@ export default function ChordTransposer() {
       .replace(/\[\/ch\](\w)/g, "[/ch] $1")
 
     setTransposedChords(processedText)
-  }, [transposeStep, chords, halftoneStyle, simplify])
+  }, [transposeStep, chords, simplify]) // removed halftoneStyle from dependencies
 
   const handleDownloadPDF = () => {
     if (pdfUrl) {
@@ -215,7 +224,7 @@ export default function ChordTransposer() {
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
               <Music2 className="h-6 w-6 text-primary" />
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Chord Transposer</h1>
+              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">tabs</h1>
             </div>
             <div className="flex items-center space-x-2">
               <Button

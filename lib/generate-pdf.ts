@@ -1,6 +1,6 @@
 // lib/generate-pdf.ts
 import pdfMake from "pdfmake/build/pdfmake";
-// @ts-ignore
+// @ts-expect-error // comment
 import vfsFonts from "./vfs_fonts";
 
 pdfMake.vfs = vfsFonts.pdfMake.vfs;
@@ -12,37 +12,31 @@ pdfMake.fonts = {
   },
 };
 
-const isOdd = (i: number) => i % 2 === 1;
+const isOdd = (i: number): boolean => i % 2 === 1;
 
-function processChords(chords: string): any[] {
-  let formattedChords = chords;
+type ChordSegment = string | { text: string; bold: boolean };
+type ProcessedChord = string | { text: ChordSegment[] };
 
-  formattedChords = formattedChords.replace(/\[tab\]/g, "");
-  formattedChords = formattedChords.replace(/\[\/tab\]/g, "");
+function processChords(chords: string): ProcessedChord[] {
+  // Remove [tab] markers
+  const formattedChords = chords.replace(/\[tab\]/g, "").replace(/\[\/tab\]/g, "");
+  
+  // Split the input into lines and then split each line by [ch] markers.
+  const lines = formattedChords.split(/\n/g).map((line) => line.split(/\[ch\]|\[\/ch\]/g));
 
-  let processedChords: any[] = formattedChords
-    .split(/\n/g)
-    .map((w) => w.split(/\[ch\]|\[\/ch\]/g));
-
-  for (let i = 0; i < processedChords.length; i += 1) {
-    const processedChord = processedChords[i];
-
-    if (processedChord.length === 1) {
-      processedChords[i] = processedChord[0];
+  // Process each line to wrap chord parts in an object.
+  const processedChords: ProcessedChord[] = lines.map((segments) => {
+    if (segments.length === 1) {
+      // No chord markers – return the plain string.
+      return segments[0];
     } else {
-      for (let j = 0; j < processedChord.length; j += 1) {
-        const chord = processedChord[j];
-
-        if (isOdd(j)) {
-          processedChord[j] = { text: chord, bold: true };
-        }
-      }
-
-      processedChords[i] = {
-        text: processedChord,
-      };
+      // For alternating segments, wrap every odd-index segment as a bold chord.
+      const processedSegments: ChordSegment[] = segments.map((segment, index) => {
+        return isOdd(index) ? { text: segment, bold: true } : segment;
+      });
+      return { text: processedSegments };
     }
-  }
+  });
 
   return processedChords;
 }
@@ -53,13 +47,15 @@ export default function generatePDF(
   chords: string,
   fontSize: number
 ): Promise<{ url: string; filename: string }> {
+  const processedChords = processChords(chords);
+
   const docDefinition = {
     pageSize: "A4",
     content: [
       { text: artist, style: "artist" },
       { text: song, style: "song" },
       " ",
-      ...processChords(chords),
+      ...processedChords,
     ],
     defaultStyle: {
       font: "RobotoMono",
@@ -79,10 +75,10 @@ export default function generatePDF(
       },
     },
     pageBreakBefore: (
-      currentNode: any,
-      followingNodesOnPage: any[],
-      nodesOnNextPage: any[]
-    ) => {
+      currentNode: { text?: unknown },
+      followingNodesOnPage: unknown[],
+      nodesOnNextPage: unknown[]
+    ): boolean => {
       const isLastOnPage = followingNodesOnPage.length === 0;
       const isNotLastOfAll = nodesOnNextPage.length !== 0;
       return (
