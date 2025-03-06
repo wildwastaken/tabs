@@ -29,7 +29,6 @@ declare module "pdfmake/build/pdfmake" {
 }
 
 declare module "pdfmake/build/vfs_fonts" {
-  // The built-in Roboto fonts that pdfMake uses by default
   const pdfFonts: {
     pdfMake: {
       vfs: Record<string, string>
