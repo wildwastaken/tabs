@@ -139,8 +139,12 @@ export default function ChordTransposer() {
           )
           setPdfUrl(dataUrl)
         } catch (err) {
-          console.error("Failed to generate PDF:", err)
-          setError("Failed to generate PDF preview")
+          console.error("Failed to generate PDF:", err);
+          console.error("Artist:", artist);
+          console.error("Song:", song);
+          console.error("Transposed Chords:", transposedChords);
+          console.error("Font Size:", fontSize);
+          setError("Failed to generate PDF preview");
         }
       }
     }
@@ -501,7 +505,7 @@ export default function ChordTransposer() {
                       </div>
 
                       {/* 
-                        Example: “Simplify chords” setting, if needed.
+                        Example: "Simplify chords" setting, if needed.
                         <div className="flex items-center space-x-2 pt-2">
                           <Checkbox
                             id="simplify"
