@@ -1,54 +1,35 @@
 // lib/generate-pdf.ts
-import pdfMake from "pdfmake/build/pdfmake";
-// @ts-expect-error: vfsFonts has no type definitions
-import vfsFonts from "./vfs_fonts";
 
-pdfMake.vfs = vfsFonts.pdfMake.vfs;
-
-pdfMake.fonts = {
-  RobotoMono: {
-    normal: "RobotoMono-Regular.ttf",
-    bold: "RobotoMono-Bold.ttf",
-  },
-};
-
-const isOdd = (i: number): boolean => i % 2 === 1;
-
+// Define the types you need
 type ChordSegment = string | { text: string; bold: boolean };
 type ProcessedChord = string | { text: ChordSegment[] };
 
-function processChords(chords: string): ProcessedChord[] {
-  // Remove [tab] markers
-  const formattedChords = chords.replace(/\[tab\]/g, "").replace(/\[\/tab\]/g, "");
-  const lines = formattedChords.split(/\n/g).map((line) => line.split(/\[ch\]|\[\/ch\]/g));
-  const processedChords: ProcessedChord[] = lines.map((segments) => {
-    if (segments.length === 1) {
-      return segments[0];
-    } else {
-      const processedSegments: ChordSegment[] = segments.map((segment, index) =>
-        isOdd(index) ? { text: segment, bold: true } : segment
-      );
-      return { text: processedSegments };
-    }
-  });
-  return processedChords;
+function isOdd(i: number): boolean {
+  return i % 2 === 1;
 }
 
-// Define an interface for pdfMake's document generator that includes getDataUrl
-interface PdfDocGenerator {
-  getDataUrl(callback: (dataUrl: string) => void): void;
-}
-
-interface ExtendedPdfDocGenerator extends PdfDocGenerator {
-  getBlob(callback: (blob: Blob) => void): void; // Include any additional methods
-}
-
-export default function generatePDF(
+// Instead of importing pdfMake at the top, we import it on the fly
+// so this code only runs in the browser (no SSR).
+export default async function generatePDF(
   artist: string,
   song: string,
   chords: string,
   fontSize: number
 ): Promise<{ dataUrl: string; filename: string }> {
+  // Dynamically load pdfMake so this only runs in the browser
+  const pdfMakeModule = await import("pdfmake/build/pdfmake");
+  const pdfMake = pdfMakeModule.default || pdfMakeModule;
+
+  // Configure custom fonts using the locally hosted font files in the 'font/' folder
+  pdfMake.fonts = {
+    RobotoMono: {
+      normal: "https://wildwastaken.github.io/gifting/Roboto_Mono/RobotoMono-Regular.ttf",
+      bold: "https://wildwastaken.github.io/gifting/Roboto_Mono/RobotoMono-Bold.ttf"
+    }
+  };
+  
+
+  // Process chord text into pdfMake-ready objects
   const processedChords = processChords(chords);
 
   const docDefinition = {
@@ -60,7 +41,7 @@ export default function generatePDF(
       ...processedChords,
     ],
     defaultStyle: {
-      font: "RobotoMono",
+      font: "RobotoMono", // use the key from your fonts config
       fontSize: fontSize,
       preserveLeadingSpaces: true,
     },
@@ -89,10 +70,35 @@ export default function generatePDF(
 
   return new Promise((resolve) => {
     const filename = `${artist}-${song}.pdf`;
-    // Cast to ExtendedPdfDocGenerator to include getDataUrl
-    const pdfDocGenerator = pdfMake.createPdf(docDefinition) as ExtendedPdfDocGenerator;
+    const pdfDocGenerator = pdfMake.createPdf(docDefinition) as {
+      getDataUrl: (callback: (dataUrl: string) => void) => void;
+    };
     pdfDocGenerator.getDataUrl((dataUrl: string) => {
       resolve({ dataUrl, filename });
     });
   });
+}
+
+// Helper to process chords
+function processChords(chords: string): ProcessedChord[] {
+  // Remove [tab] markers
+  const formattedChords = chords.replace(/\[tab\]/g, "").replace(/\[\/tab\]/g, "");
+  // Split lines, then split out chords from lyrics
+  const lines = formattedChords.split(/\n/g).map((line) => line.split(/\[ch\]|\[\/ch\]/g));
+
+  // Map each line into PDF text objects
+  const processedChords: ProcessedChord[] = lines.map((segments) => {
+    // If there are no chord tags, just return the raw line
+    if (segments.length === 1) {
+      return segments[0];
+    }
+
+    // Otherwise, bold any "odd" segments that were chords
+    const processedSegments: ChordSegment[] = segments.map((segment, index) =>
+      isOdd(index) ? { text: segment, bold: true } : segment
+    );
+    return { text: processedSegments };
+  });
+
+  return processedChords;
 }

@@ -9,7 +9,13 @@ import { Slider } from "../components/ui/slider"
 // import { Checkbox } from "../components/ui/checkbox"
 import { Label } from "../components/ui/label"
 import { Button } from "../components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "../components/ui/card"
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+} from "../components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { Separator } from "../components/ui/separator"
 import {
@@ -25,7 +31,7 @@ import {
   Music2,
 } from "lucide-react"
 
-const corsURI = 'https://api.codetabs.com/v1/proxy/?quest='
+const corsURI = "https://api.codetabs.com/v1/proxy/?quest="
 
 // Fix 1: Replace 'any' with proper type definitions
 interface ObjectWithKey {
@@ -56,7 +62,7 @@ export default function ChordTransposer() {
   const [song, setSong] = useState("")
   // Define halftoneStyle constant since it's referenced but not defined
   const halftoneStyle = "FLATS" // Default value
-  const [simplify] = useState(false)
+  const [simplify] = useState(false) // Hard-coded for demonstration
   const [transposeStep, setTransposeStep] = useState(0)
   const [transposedChords, setTransposedChords] = useState("")
   const [fontSize, setFontSize] = useState(10)
@@ -105,9 +111,8 @@ export default function ChordTransposer() {
       setArtist(parsedArtistName || "Unknown Artist")
       setSong(parsedSongName || "Unknown Song")
       setChords(parsedChords)
-      // setActiveTab("preview") - add back eventually
+      // Optionally switch tabs: setActiveTab("preview");
     } catch (err) {
-      // Fix 4: Rename 'error' to 'err' to avoid name collision
       console.error("Failed to load song:", err)
       setError("Failed to load song. Please check the URL and try again.")
     } finally {
@@ -121,22 +126,28 @@ export default function ChordTransposer() {
     }
   }, [uri])
 
+  // Whenever artist, song, or transposed chords changes, generate a new PDF dataUrl
   useEffect(() => {
     const updatePDF = async () => {
       if (artist && song && transposedChords) {
         try {
-          const { dataUrl } = await generatePDF(artist, song, transposedChords, fontSize);
-          setPdfUrl(dataUrl);
+          const { dataUrl } = await generatePDF(
+            artist,
+            song,
+            transposedChords,
+            fontSize,
+          )
+          setPdfUrl(dataUrl)
         } catch (err) {
-          console.error("Failed to generate PDF:", err);
-          setError("Failed to generate PDF preview");
+          console.error("Failed to generate PDF:", err)
+          setError("Failed to generate PDF preview")
         }
       }
-    };
-  
-    updatePDF();
-  }, [artist, song, transposedChords, fontSize]);
-  
+    }
+
+    updatePDF()
+  }, [artist, song, transposedChords, fontSize])
+
   // Fix 5: Remove halftoneStyle from the dependency array
   useEffect(() => {
     if (!chords) return
@@ -179,7 +190,7 @@ export default function ChordTransposer() {
           }
         } catch (err) {
           console.error("Failed to transpose:", err)
-          console.info("failed to transpose", chord)
+          console.info("Failed to transpose", chord)
         }
       }
     }
@@ -194,7 +205,7 @@ export default function ChordTransposer() {
       .replace(/\[\/ch\](\w)/g, "[/ch] $1")
 
     setTransposedChords(processedText)
-  }, [transposeStep, chords, simplify]) // removed halftoneStyle from dependencies
+  }, [transposeStep, chords, simplify]) // halftoneStyle removed
 
   const handleDownloadPDF = () => {
     if (pdfUrl) {
@@ -222,7 +233,9 @@ export default function ChordTransposer() {
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2">
               <Music2 className="h-6 w-6 text-primary" />
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">tabs</h1>
+              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
+                tabs
+              </h1>
             </div>
             <div className="flex items-center space-x-2">
               <Button
@@ -248,7 +261,9 @@ export default function ChordTransposer() {
                 <LinkIcon className="mr-2 h-5 w-5 text-primary" />
                 Enter Ultimate Guitar URL
               </CardTitle>
-              <CardDescription>Paste a link from Ultimate Guitar to transpose the chords</CardDescription>
+              <CardDescription>
+                Paste a link from Ultimate Guitar to transpose the chords
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex flex-col sm:flex-row gap-3">
@@ -260,7 +275,11 @@ export default function ChordTransposer() {
                     className="w-full"
                   />
                 </div>
-                <Button onClick={loadSong} disabled={isLoading || !uri} className="min-w-[120px]">
+                <Button
+                  onClick={loadSong}
+                  disabled={isLoading || !uri}
+                  className="min-w-[120px]"
+                >
                   {isLoading ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -292,7 +311,9 @@ export default function ChordTransposer() {
                 <CardContent className="p-3">
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex flex-col items-center">
-                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Transpose</div>
+                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">
+                        Transpose
+                      </div>
                       <div className="flex items-center">
                         <Button
                           variant="outline"
@@ -321,7 +342,9 @@ export default function ChordTransposer() {
                     <Separator orientation="vertical" className="h-12" />
 
                     <div className="flex flex-col items-center">
-                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">Font Size</div>
+                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">
+                        Font Size
+                      </div>
                       <div className="flex items-center">
                         <Button
                           variant="outline"
@@ -371,7 +394,10 @@ export default function ChordTransposer() {
 
                   <CardContent className="pt-6">
                     <TabsContent value="preview" className="mt-0">
-                      {/* Commenting out the preview tab as it's not very useful */}
+                      {/* 
+                        You can show a textual or HTML preview here if you want.
+                        Uncomment the lines below if you'd like a chords preview tab.
+                      */}
                       {/* <div className="bg-white dark:bg-slate-950 rounded-md border border-slate-200 dark:border-slate-800 p-4 font-mono whitespace-pre-wrap overflow-auto max-h-[70vh]">
                         <div className="text-xl font-bold mb-1">{artist}</div>
                         <div className="text-lg font-bold mb-4">{song}</div>
@@ -396,13 +422,6 @@ export default function ChordTransposer() {
                             className="w-full h-[70vh] border border-slate-200 dark:border-slate-800 rounded-md"
                             title="PDF Preview"
                           />
-                          {/* Commenting out the download button in the preview */}
-                          {/* <div className="absolute bottom-4 right-4">
-                            <Button onClick={handleDownloadPDF} className="shadow-lg">
-                              <FileDown className="mr-2 h-4 w-4" />
-                              Download PDF
-                            </Button>
-                          </div> */}
                         </div>
                       ) : (
                         <div className="w-full h-[70vh] flex items-center justify-center text-slate-500 border border-slate-200 dark:border-slate-800 rounded-md">
@@ -431,7 +450,11 @@ export default function ChordTransposer() {
                             Transpose: {transposeStep > 0 ? `+${transposeStep}` : transposeStep}
                           </Label>
                           <span className="text-sm text-slate-500 dark:text-slate-400">
-                            {transposeStep > 0 ? "Higher" : transposeStep < 0 ? "Lower" : "Original"}
+                            {transposeStep > 0
+                              ? "Higher"
+                              : transposeStep < 0
+                              ? "Lower"
+                              : "Original"}
                           </span>
                         </div>
                         <Slider
@@ -451,9 +474,15 @@ export default function ChordTransposer() {
 
                       <div className="space-y-2">
                         <div className="flex justify-between">
-                          <Label htmlFor="font-size-slider">Font Size: {fontSize}pt</Label>
+                          <Label htmlFor="font-size-slider">
+                            Font Size: {fontSize}pt
+                          </Label>
                           <span className="text-sm text-slate-500 dark:text-slate-400">
-                            {fontSize < 9 ? "Small" : fontSize > 12 ? "Large" : "Medium"}
+                            {fontSize < 9
+                              ? "Small"
+                              : fontSize > 12
+                              ? "Large"
+                              : "Medium"}
                           </span>
                         </div>
                         <Slider
@@ -470,20 +499,23 @@ export default function ChordTransposer() {
                           <span>20pt</span>
                         </div>
                       </div>
-{/* 
-                      <div className="flex items-center space-x-2 pt-2">
-                        <Checkbox
-                          id="simplify"
-                          checked={simplify}
-                          onCheckedChange={(checked) => setSimplify(checked === true)}
-                        />
-                        <Label htmlFor="simplify" className="cursor-pointer">
-                          Simplify chords
-                          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                            Remove extended, suspended, and added notes
-                          </p>
-                        </Label>
-                      </div> */}
+
+                      {/* 
+                        Example: “Simplify chords” setting, if needed.
+                        <div className="flex items-center space-x-2 pt-2">
+                          <Checkbox
+                            id="simplify"
+                            checked={simplify}
+                            onCheckedChange={(checked) => setSimplify(checked === true)}
+                          />
+                          <Label htmlFor="simplify" className="cursor-pointer">
+                            Simplify chords
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                              Remove extended, suspended, and added notes
+                            </p>
+                          </Label>
+                        </div>
+                      */}
                     </div>
                   </CardContent>
                 </Card>
@@ -517,8 +549,8 @@ export default function ChordTransposer() {
                     Paste an Ultimate Guitar URL to get started
                   </h3>
                   <p className="text-slate-500 dark:text-slate-400 max-w-md">
-                    Enter a URL from Ultimate Guitar to load chord charts. You can then transpose, customize, and
-                    download them as a PDF.
+                    Enter a URL from Ultimate Guitar to load chord charts. You
+                    can then transpose, customize, and download them as a PDF.
                   </p>
                 </div>
               </CardContent>
