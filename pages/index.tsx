@@ -6,7 +6,7 @@ import generatePDF from "../lib/generate-pdf"
 import { Input } from "../components/ui/input"
 import { Slider } from "../components/ui/slider"
 // import { RadioGroup, RadioGroupItem } from "../components/ui/radio-group"
-// import { Checkbox } from "../components/ui/checkbox"
+import { Checkbox } from "../components/ui/checkbox"
 import { Label } from "../components/ui/label"
 import { Button } from "../components/ui/button"
 import {
@@ -66,6 +66,7 @@ export default function ChordTransposer() {
   const [transposeStep, setTransposeStep] = useState(0)
   const [transposedChords, setTransposedChords] = useState("")
   const [fontSize, setFontSize] = useState(10)
+  const [autoLinebreak, setAutoLinebreak] = useState(false)
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -136,6 +137,7 @@ export default function ChordTransposer() {
             song,
             transposedChords,
             fontSize,
+            autoLinebreak
           )
           setPdfUrl(dataUrl)
         } catch (err) {
@@ -150,7 +152,7 @@ export default function ChordTransposer() {
     }
 
     updatePDF()
-  }, [artist, song, transposedChords, fontSize])
+  }, [artist, song, transposedChords, fontSize, autoLinebreak])
 
   // Fix 5: Remove halftoneStyle from the dependency array
   useEffect(() => {
@@ -275,6 +277,12 @@ export default function ChordTransposer() {
                   <Input
                     value={uri}
                     onChange={(e) => setUri(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && uri && !isLoading) {
+                        e.preventDefault();
+                        loadSong();
+                      }
+                    }}
                     placeholder="https://tabs.ultimate-guitar.com/tab/..."
                     className="w-full"
                   />
@@ -290,7 +298,7 @@ export default function ChordTransposer() {
                       Loading
                     </>
                   ) : (
-                    "Load Song"
+                    "Enter"
                   )}
                 </Button>
               </div>
@@ -533,6 +541,19 @@ export default function ChordTransposer() {
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-4">
+                      <div className="flex items-center space-x-2">
+                        <Checkbox
+                          id="auto-linebreak"
+                          checked={autoLinebreak}
+                          onCheckedChange={(checked) => setAutoLinebreak(checked === true)}
+                        />
+                        <Label htmlFor="auto-linebreak" className="cursor-pointer">
+                          Auto linebreak
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                            Prevent paragraphs from being split across pages
+                          </p>
+                        </Label>
+                      </div>
                       <Button onClick={handleDownloadPDF} disabled={!pdfUrl} className="w-full">
                         <FileDown className="mr-2 h-4 w-4" />
                         Download PDF
