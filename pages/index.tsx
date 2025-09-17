@@ -587,7 +587,7 @@ export default function ChordTransposer() {
       <footer className="bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 py-6 px-4 sm:px-6 lg:px-8">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center">
           <p className="text-sm text-slate-500 dark:text-slate-400">
-            tabs downloader
+            tabs/chords downloader. Happy 20th, Justin.
           </p>
           <p className="text-sm text-slate-500 dark:text-slate-400">
             Made with ❤️ by Allen
