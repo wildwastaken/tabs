@@ -9,7 +9,6 @@ import {
   Play, 
   Pause, 
   RotateCcw,
-  Maximize,
   Settings,
   ChevronUp,
   ChevronDown
