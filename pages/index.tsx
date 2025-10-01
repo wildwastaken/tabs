@@ -18,6 +18,7 @@ import {
 } from "../components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { Separator } from "../components/ui/separator"
+import { FullScreenPDFViewer } from "../components/FullScreenPDFViewer"
 import {
   Music,
   FileText,
@@ -29,6 +30,7 @@ import {
   ChevronDown,
   ChevronUp,
   Music2,
+  Maximize,
 } from "lucide-react"
 
 const corsURI = "https://api.codetabs.com/v1/proxy/?quest="
@@ -71,6 +73,7 @@ export default function ChordTransposer() {
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState("pdf")
+  const [isFullScreen, setIsFullScreen] = useState(false)
 
   const loadSong = useCallback(async () => {
     if (!uri.includes("ultimate-guitar.com")) {
@@ -126,6 +129,24 @@ export default function ChordTransposer() {
       setError(null)
     }
   }, [uri])
+
+  // Keyboard shortcut for fullscreen
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey && pdfUrl && activeTab === 'pdf') {
+        // Make sure we're not in an input field
+        const activeElement = document.activeElement
+        if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
+          return
+        }
+        e.preventDefault()
+        setIsFullScreen(true)
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [pdfUrl, activeTab])
 
   // Whenever artist, song, or transposed chords changes, generate a new PDF dataUrl
   useEffect(() => {
@@ -397,10 +418,24 @@ export default function ChordTransposer() {
                         <Music className="mr-2 h-5 w-5 text-primary" />
                         Transposed Chords
                       </CardTitle>
-                      <TabsList className="grid grid-cols-2 w-[200px]">
-                        <TabsTrigger value="preview">Preview</TabsTrigger>
-                        <TabsTrigger value="pdf">PDF</TabsTrigger>
-                      </TabsList>
+                      <div className="flex items-center gap-3">
+                        <TabsList className="grid grid-cols-2 w-[200px]">
+                          <TabsTrigger value="preview">Preview</TabsTrigger>
+                          <TabsTrigger value="pdf">PDF</TabsTrigger>
+                        </TabsList>
+                        {pdfUrl && activeTab === 'pdf' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setIsFullScreen(true)}
+                            className="hidden sm:flex items-center gap-1 text-xs"
+                            title="Open fullscreen with autoscroll (F)"
+                          >
+                            <Maximize className="h-3 w-3" />
+                            Fullscreen
+                          </Button>
+                        )}
+                      </div>
                     </div>
                   </CardHeader>
 
@@ -428,12 +463,22 @@ export default function ChordTransposer() {
 
                     <TabsContent value="pdf" className="mt-0">
                       {pdfUrl ? (
-                        <div className="relative">
+                        <div className="relative group">
                           <iframe
                             src={pdfUrl}
                             className="w-full h-[70vh] border border-slate-200 dark:border-slate-800 rounded-md"
                             title="PDF Preview"
                           />
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => setIsFullScreen(true)}
+                            className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 shadow-lg backdrop-blur-sm bg-white/90 dark:bg-slate-800/90 hover:bg-white dark:hover:bg-slate-800"
+                            title="Open in fullscreen with autoscroll (F)"
+                          >
+                            <Maximize className="h-4 w-4 mr-1" />
+                            Fullscreen
+                          </Button>
                         </div>
                       ) : (
                         <div className="w-full h-[70vh] flex items-center justify-center text-slate-500 border border-slate-200 dark:border-slate-800 rounded-md">
@@ -594,6 +639,17 @@ export default function ChordTransposer() {
           </p>
         </div>
       </footer>
+
+      {/* Full Screen PDF Viewer */}
+      {pdfUrl && (
+        <FullScreenPDFViewer
+          pdfUrl={pdfUrl}
+          isOpen={isFullScreen}
+          onClose={() => setIsFullScreen(false)}
+          title={song}
+          subtitle={artist}
+        />
+      )}
     </div>
   )
 }
