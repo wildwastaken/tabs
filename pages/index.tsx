@@ -324,6 +324,7 @@ export default function ChordTransposer() {
           if (diff >= 0) regex.push(filler + " ".repeat(diff))
         } catch (err) {
           console.error("Failed to transpose", chord)
+          console.error("Error: ", err)
         }
       }
 
