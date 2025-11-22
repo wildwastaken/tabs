@@ -2,22 +2,33 @@
 
 import type { jsPDF } from "jspdf";
 
+interface SongData {
+  id: string
+  uri: string
+  artist: string
+  song: string
+  chords: string
+  transposedChords: string
+  transposeStep: number
+}
+
 /**
- * Generates a PDF from chord data using jsPDF
- * @param artist The artist name
- * @param song The song title
- * @param chords The chord content with [ch] tags
+ * Generates a PDF from multiple songs using jsPDF
+ * @param songs Array of song data
  * @param fontSize The font size to use
+ * @param autoLinebreak Whether to prevent paragraphs from splitting across pages
  * @returns Promise with dataUrl and filename
  */
 export default async function generatePDF(
-  artist: string,
-  song: string,
-  chords: string,
+  songs: SongData[],
   fontSize: number,
   autoLinebreak = false,
 ): Promise<{ dataUrl: string; filename: string }> {
   try {
+    if (songs.length === 0) {
+      throw new Error("No songs to generate PDF from");
+    }
+
     // Dynamically import jsPDF to ensure it only runs in browser
     const jsPDFModule = await import("jspdf");
     const jsPDF = jsPDFModule.default || jsPDFModule;
@@ -37,52 +48,64 @@ export default async function generatePDF(
     const pageHeight = doc.internal.pageSize.getHeight();
     const margin = 40;
 
-    // Set starting position
-    let yPos = margin;
-
-    // Add title and artist
-    doc.setFontSize(fontSize + 4);
-    doc.setFont("RobotoMono", "bold");
-    const artistText = artist || "Unknown Artist";
-    doc.text(artistText, margin, yPos);
-    yPos += fontSize + 8;
-
-    doc.setFontSize(fontSize + 2);
-    const songText = song || "Untitled";
-    doc.text(songText, margin, yPos);
-    yPos += fontSize + 15;
-
-    // Set font size for chord content
-    doc.setFontSize(fontSize);
-    doc.setFont("RobotoMono", "normal");
-
     // Line height for text
     const lineHeight = fontSize * 1.5;
 
-    // Clean up the chord content but preserve all spaces
-    // This is critical for properly displaying tablature formatting
-    const formattedChords = chords
-      .replace(/\[tab\]/g, "")
-      .replace(/\[\/tab\]/g, "")
-      .replace(/\r\n/g, "\n"); // Normalize line endings
+    // Process each song
+    for (let i = 0; i < songs.length; i++) {
+      const songData = songs[i];
 
-    // Process the full content with chord tags
-    processChordContent(
-      doc,
-      formattedChords,
-      margin,
-      yPos,
-      pageWidth,
-      pageHeight,
-      lineHeight,
-      autoLinebreak,
-    );
+      // Add new page for songs after the first
+      if (i > 0) {
+        doc.addPage();
+      }
+
+      // Set starting position for this song
+      let yPos = margin;
+
+      // Add title and artist
+      doc.setFontSize(fontSize + 4);
+      doc.setFont("RobotoMono", "bold");
+      const artistText = songData.artist || "Unknown Artist";
+      doc.text(artistText, margin, yPos);
+      yPos += fontSize + 8;
+
+      doc.setFontSize(fontSize + 2);
+      const songText = songData.song || "Untitled";
+      doc.text(songText, margin, yPos);
+      yPos += fontSize + 15;
+
+      // Set font size for chord content
+      doc.setFontSize(fontSize);
+      doc.setFont("RobotoMono", "normal");
+
+      // Clean up the chord content but preserve all spaces
+      // This is critical for properly displaying tablature formatting
+      const formattedChords = songData.transposedChords
+        .replace(/\[tab\]/g, "")
+        .replace(/\[\/tab\]/g, "")
+        .replace(/\r\n/g, "\n"); // Normalize line endings
+
+      // Process the full content with chord tags
+      processChordContent(
+        doc,
+        formattedChords,
+        margin,
+        yPos,
+        pageWidth,
+        pageHeight,
+        lineHeight,
+        autoLinebreak,
+      );
+    }
 
     // Generate the PDF as data URL with proper error handling
     const dataUrl = doc.output("datauristring");
-    const sanitizedArtist = artistText.replace(/[^\w\s-]/g, "");
-    const sanitizedSong = songText.replace(/[^\w\s-]/g, "");
-    const filename = `${sanitizedArtist} - ${sanitizedSong}.pdf`;
+
+    // Generate filename based on number of songs
+    const filename = songs.length === 1
+      ? `${songs[0].artist.replace(/[^\w\s-]/g, "")} - ${songs[0].song.replace(/[^\w\s-]/g, "")}.pdf`
+      : `Setlist - ${songs.length} songs.pdf`;
 
     return { dataUrl, filename };
   } catch (error: unknown) {

@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect } from "react"
 import { parse, transpose, prettyPrint } from "chord-magic"
 import generatePDF from "../lib/generate-pdf"
+import generateDocx from "../lib/generate-docx"
 import { Input } from "../components/ui/input"
 import { Slider } from "../components/ui/slider"
 // import { RadioGroup, RadioGroupItem } from "../components/ui/radio-group"
@@ -31,6 +32,16 @@ import {
   ChevronUp,
   Music2,
   Maximize,
+  Plus,
+  Trash2,
+  GripVertical,
+  List,
+  Copy,
+  Check,
+  FileType,
+  Library,
+  Search,
+  X,
 } from "lucide-react"
 
 const corsURI = "https://api.codetabs.com/v1/proxy/?quest="
@@ -38,6 +49,16 @@ const corsURI = "https://api.codetabs.com/v1/proxy/?quest="
 // Fix 1: Replace 'any' with proper type definitions
 interface ObjectWithKey {
   [key: string]: unknown
+}
+
+interface SongData {
+  id: string
+  uri: string
+  artist: string
+  song: string
+  chords: string
+  transposedChords: string
+  transposeStep: number
 }
 
 function findInObject(obj: ObjectWithKey, key: string): unknown[] {
@@ -57,16 +78,25 @@ function findInObject(obj: ObjectWithKey, key: string): unknown[] {
   return objects
 }
 
+interface SavedSong {
+  uri: string
+  artist: string
+  song: string
+  addedAt: number
+}
+
 export default function ChordTransposer() {
-  const [uri, setUri] = useState("")
-  const [chords, setChords] = useState("")
-  const [artist, setArtist] = useState("")
-  const [song, setSong] = useState("")
+  // Multi-song state
+  const [songs, setSongs] = useState<SongData[]>([])
+  const [currentUri, setCurrentUri] = useState("")
+
+  // Song library state
+  const [savedSongs, setSavedSongs] = useState<SavedSong[]>([])
+  const [librarySearch, setLibrarySearch] = useState("")
+
   // Define halftoneStyle constant since it's referenced but not defined
   const halftoneStyle = "FLATS" // Default value
   const [simplify] = useState(false) // Hard-coded for demonstration
-  const [transposeStep, setTransposeStep] = useState(0)
-  const [transposedChords, setTransposedChords] = useState("")
   const [fontSize, setFontSize] = useState(10)
   const [autoLinebreak, setAutoLinebreak] = useState(false)
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
@@ -74,8 +104,49 @@ export default function ChordTransposer() {
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState("pdf")
   const [isFullScreen, setIsFullScreen] = useState(false)
+  const [copySuccess, setCopySuccess] = useState(false)
 
-  const loadSong = useCallback(async () => {
+  // Load saved songs from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('savedSongs')
+    if (saved) {
+      try {
+        setSavedSongs(JSON.parse(saved))
+      } catch (err) {
+        console.error('Failed to load saved songs:', err)
+      }
+    }
+  }, [])
+
+  // Save to library function
+  const saveToLibrary = useCallback((uri: string, artist: string, song: string) => {
+    setSavedSongs((prev) => {
+      // Check if song already exists (by URI)
+      if (prev.some(s => s.uri === uri)) {
+        return prev
+      }
+
+      const newSong: SavedSong = {
+        uri,
+        artist,
+        song,
+        addedAt: Date.now(),
+      }
+
+      const updated = [...prev, newSong]
+      localStorage.setItem('savedSongs', JSON.stringify(updated))
+      return updated
+    })
+  }, [])
+
+  // Clear library function
+  const clearLibrary = useCallback(() => {
+    setSavedSongs([])
+    localStorage.removeItem('savedSongs')
+  }, [])
+
+  const addSong = useCallback(async (urlToAdd?: string) => {
+    const uri = urlToAdd || currentUri
     if (!uri.includes("ultimate-guitar.com")) {
       setError("Please enter a valid Ultimate Guitar URL")
       return
@@ -112,23 +183,78 @@ export default function ChordTransposer() {
         throw new Error("No chord data found")
       }
 
-      setArtist(parsedArtistName || "Unknown Artist")
-      setSong(parsedSongName || "Unknown Song")
-      setChords(parsedChords)
-      // Optionally switch tabs: setActiveTab("preview");
+      const artist = parsedArtistName || "Unknown Artist"
+      const songName = parsedSongName || "Unknown Song"
+
+      const newSong: SongData = {
+        id: Date.now().toString(),
+        uri,
+        artist,
+        song: songName,
+        chords: parsedChords,
+        transposedChords: parsedChords, // Will be updated by transpose effect
+        transposeStep: 0,
+      }
+
+      setSongs((prev) => [...prev, newSong])
+
+      // Save to library
+      saveToLibrary(uri, artist, songName)
+
+      setCurrentUri("") // Clear input after adding
+      setActiveTab("pdf") // Switch to PDF view
     } catch (err) {
       console.error("Failed to load song:", err)
       setError("Failed to load song. Please check the URL and try again.")
     } finally {
       setIsLoading(false)
     }
-  }, [uri])
+  }, [currentUri, saveToLibrary])
+
+  const addFromLibrary = useCallback(async (saved: SavedSong) => {
+  // Re-use existing addSong flow (URL validation, fetch via proxy, parsing, etc.)
+  // but without touching the input box
+  try {
+    await addSong(saved.uri)
+  } catch (err) {
+    console.error("Failed to add from library:", err)
+    setError("Failed to add song from library")
+  }
+}, [addSong])
 
   useEffect(() => {
-    if (uri && uri.includes("ultimate-guitar.com")) {
+    if (currentUri && currentUri.includes("ultimate-guitar.com")) {
       setError(null)
     }
-  }, [uri])
+  }, [currentUri])
+
+  const removeSong = useCallback((id: string) => {
+    setSongs((prev) => prev.filter((s) => s.id !== id))
+  }, [])
+
+  const moveSongUp = useCallback((index: number) => {
+    if (index === 0) return
+    setSongs((prev) => {
+      const newSongs = [...prev]
+      ;[newSongs[index - 1], newSongs[index]] = [newSongs[index], newSongs[index - 1]]
+      return newSongs
+    })
+  }, [])
+
+  const moveSongDown = useCallback((index: number) => {
+    setSongs((prev) => {
+      if (index === prev.length - 1) return prev
+      const newSongs = [...prev]
+      ;[newSongs[index], newSongs[index + 1]] = [newSongs[index + 1], newSongs[index]]
+      return newSongs
+    })
+  }, [])
+
+  const updateTranspose = useCallback((id: string, step: number) => {
+    setSongs((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, transposeStep: step } : s))
+    )
+  }, [])
 
   // Keyboard shortcut for fullscreen
   useEffect(() => {
@@ -148,109 +274,184 @@ export default function ChordTransposer() {
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [pdfUrl, activeTab])
 
-  // Whenever artist, song, or transposed chords changes, generate a new PDF dataUrl
+  // Transpose all songs when their transposeStep changes
+  useEffect(() => {
+    const transposeSong = (chords: string, transposeStep: number): string => {
+      if (!chords) return ""
+
+      const parseOptions = {}
+      const transChords: string[] = chords.split(/\[ch\]|\[\/ch\]/g)
+      let regex: string[] = []
+
+      for (let i = 1; i < transChords.length; i += 2) {
+        const chord = transChords[i]
+        if (chord) {
+          try {
+            let tones = ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
+            if (halftoneStyle === "FLATS") {
+              tones = ["A", "Bb", "B", "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab"]
+            }
+
+            const parsedChord = parse(chord, parseOptions)
+            const transChord = transpose(parsedChord, transposeStep)
+
+            if (simplify) {
+              delete transChord.extended
+              delete transChord.suspended
+              delete transChord.added
+              delete transChord.overridingRoot
+            }
+
+            const prettyChord = prettyPrint(parsedChord, { naming: tones })
+            const prettyTransChord = prettyPrint(transChord, { naming: tones })
+
+            const chordsDiff = prettyTransChord.length - prettyChord.length
+            const chordsDiffPos = Math.abs(chordsDiff)
+            const replacer = chordsDiff >= 0 ? "-".repeat(chordsDiff) : " ".repeat(chordsDiffPos)
+
+            transChords[i] = `[ch]${prettyTransChord}[/ch]`
+            transChords[i] += replacer
+
+            if (chordsDiff >= 0) {
+              regex.push(replacer + " ".repeat(chordsDiff))
+            }
+          } catch (err) {
+            console.error("Failed to transpose:", err)
+            console.info("Failed to transpose", chord)
+          }
+        }
+      }
+
+      regex = [...new Set(regex.filter((r) => r.length > 1))]
+      const processedText = transChords
+        .join("")
+        .replace(new RegExp(regex.join("|"), "gm"), "")
+        .replace(/-+(\n|\r|\S)/gm, "$1")
+        .replace(/\[\/ch\]\s\[ch\]/g, "[/ch]  [ch]")
+        .replace(/\[\/ch\]\[ch\]/g, "[/ch] [ch]")
+        .replace(/\[\/ch\](\w)/g, "[/ch] $1")
+
+      return processedText
+    }
+
+    // Update transposed chords for all songs
+    setSongs((prev) =>
+      prev.map((song) => ({
+        ...song,
+        transposedChords: transposeSong(song.chords, song.transposeStep),
+      }))
+    )
+  }, [songs.map(s => s.chords + s.transposeStep).join(','), simplify, halftoneStyle])
+
+  // Generate PDF whenever songs, fontSize, or autoLinebreak changes
   useEffect(() => {
     const updatePDF = async () => {
-      if (artist && song && transposedChords) {
-        try {
-          const { dataUrl } = await generatePDF(
-            artist,
-            song,
-            transposedChords,
-            fontSize,
-            autoLinebreak
-          )
-          setPdfUrl(dataUrl)
-        } catch (err) {
-          console.error("Failed to generate PDF:", err);
-          console.error("Artist:", artist);
-          console.error("Song:", song);
-          console.error("Transposed Chords:", transposedChords);
-          console.error("Font Size:", fontSize);
-          setError("Failed to generate PDF preview");
-        }
+      if (songs.length === 0) {
+        setPdfUrl(null)
+        return
+      }
+
+      try {
+        const { dataUrl } = await generatePDF(
+          songs,
+          fontSize,
+          autoLinebreak
+        )
+        setPdfUrl(dataUrl)
+      } catch (err) {
+        console.error("Failed to generate PDF:", err)
+        setError("Failed to generate PDF preview")
       }
     }
 
     updatePDF()
-  }, [artist, song, transposedChords, fontSize, autoLinebreak])
-
-  // Fix 5: Remove halftoneStyle from the dependency array
-  useEffect(() => {
-    if (!chords) return
-
-    const parseOptions = {}
-    const transChords: string[] = chords.split(/\[ch\]|\[\/ch\]/g)
-    let regex: string[] = []
-
-    for (let i = 1; i < transChords.length; i += 2) {
-      const chord = transChords[i]
-      if (chord) {
-        try {
-          let tones = ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
-          if (halftoneStyle === "FLATS") {
-            tones = ["A", "Bb", "B", "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab"]
-          }
-
-          const parsedChord = parse(chord, parseOptions)
-          const transChord = transpose(parsedChord, transposeStep)
-
-          if (simplify) {
-            delete transChord.extended
-            delete transChord.suspended
-            delete transChord.added
-            delete transChord.overridingRoot
-          }
-
-          const prettyChord = prettyPrint(parsedChord, { naming: tones })
-          const prettyTransChord = prettyPrint(transChord, { naming: tones })
-
-          const chordsDiff = prettyTransChord.length - prettyChord.length
-          const chordsDiffPos = Math.abs(chordsDiff)
-          const replacer = chordsDiff >= 0 ? "-".repeat(chordsDiff) : " ".repeat(chordsDiffPos)
-
-          transChords[i] = `[ch]${prettyTransChord}[/ch]`
-          transChords[i] += replacer
-
-          if (chordsDiff >= 0) {
-            regex.push(replacer + " ".repeat(chordsDiff))
-          }
-        } catch (err) {
-          console.error("Failed to transpose:", err)
-          console.info("Failed to transpose", chord)
-        }
-      }
-    }
-
-    regex = [...new Set(regex.filter((r) => r.length > 1))]
-    const processedText = transChords
-      .join("")
-      .replace(new RegExp(regex.join("|"), "gm"), "")
-      .replace(/-+(\n|\r|\S)/gm, "$1")
-      .replace(/\[\/ch\]\s\[ch\]/g, "[/ch]  [ch]")
-      .replace(/\[\/ch\]\[ch\]/g, "[/ch] [ch]")
-      .replace(/\[\/ch\](\w)/g, "[/ch] $1")
-
-    setTransposedChords(processedText)
-  }, [transposeStep, chords, simplify]) // halftoneStyle removed
+  }, [songs, fontSize, autoLinebreak])
 
   const handleDownloadPDF = () => {
     if (pdfUrl) {
       const a = document.createElement("a")
       a.href = pdfUrl
-      a.download = `${artist} - ${song}.pdf`
+      const filename = songs.length === 1
+        ? `${songs[0].artist} - ${songs[0].song}.pdf`
+        : `Setlist - ${songs.length} songs.pdf`
+      a.download = filename
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
     }
   }
 
-  const incrementTranspose = () => {
-    setTransposeStep((prev) => Math.min(prev + 1, 12))
+  const handleCopyToClipboard = async () => {
+    if (songs.length === 0) return
+
+    try {
+      // Format all songs as plain text
+      const formattedText = songs
+        .map((song, index) => {
+          // Add song header
+          let text = `${song.artist}\n${song.song}\n`
+
+          // Add transpose info if not original key
+          if (song.transposeStep !== 0) {
+            text += `(Transposed ${song.transposeStep > 0 ? '+' : ''}${song.transposeStep})\n`
+          }
+
+          text += '\n'
+
+          // Remove [ch] tags but keep the chord text
+          const cleanedChords = song.transposedChords
+            .replace(/\[ch\]/g, '')
+            .replace(/\[\/ch\]/g, '')
+            .replace(/\[tab\]/g, '')
+            .replace(/\[\/tab\]/g, '')
+
+          text += cleanedChords
+
+          // Add page break indicator between songs (except after last song)
+          if (index < songs.length - 1) {
+            text += '\n\n' + '='.repeat(60) + '\n\n'
+          }
+
+          return text
+        })
+        .join('')
+
+      // Copy to clipboard
+      await navigator.clipboard.writeText(formattedText)
+
+      // Show success feedback
+      setCopySuccess(true)
+      setTimeout(() => setCopySuccess(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err)
+      setError('Failed to copy to clipboard')
+      setTimeout(() => setError(null), 3000)
+    }
   }
 
-  const decrementTranspose = () => {
-    setTransposeStep((prev) => Math.max(prev - 1, -12))
+  const handleDownloadDocx = async () => {
+    if (songs.length === 0) return
+
+    try {
+      const blob = await generateDocx(songs, fontSize, autoLinebreak)
+
+      // Create download link
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      const filename = songs.length === 1
+        ? `${songs[0].artist} - ${songs[0].song}.docx`
+        : `Setlist - ${songs.length} songs.docx`
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('Failed to generate Word document:', err)
+      setError('Failed to generate Word document')
+      setTimeout(() => setError(null), 3000)
+    }
   }
 
   return (
@@ -263,8 +464,23 @@ export default function ChordTransposer() {
               <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
                 tabs
               </h1>
+              {songs.length > 0 && (
+                <span className="text-sm text-slate-500 dark:text-slate-400">
+                  ({songs.length} {songs.length === 1 ? 'song' : 'songs'})
+                </span>
+              )}
             </div>
             <div className="flex items-center space-x-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDownloadDocx}
+                disabled={songs.length === 0}
+                className="hidden md:flex"
+              >
+                <FileType className="mr-2 h-4 w-4" />
+                Word Doc
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -273,7 +489,7 @@ export default function ChordTransposer() {
                 className="hidden sm:flex"
               >
                 <FileDown className="mr-2 h-4 w-4" />
-                Download PDF
+                PDF
               </Button>
             </div>
           </div>
@@ -285,23 +501,23 @@ export default function ChordTransposer() {
           <Card className="mb-6 border border-slate-200 dark:border-slate-800 shadow-md">
             <CardHeader className="pb-3">
               <CardTitle className="text-xl flex items-center">
-                <LinkIcon className="mr-2 h-5 w-5 text-primary" />
-                Enter Ultimate Guitar URL
+                <Plus className="mr-2 h-5 w-5 text-primary" />
+                Add Song to Setlist
               </CardTitle>
               <CardDescription>
-                Paste a link from Ultimate Guitar to transpose the chords
+                Paste a link from Ultimate Guitar to add it to your setlist
               </CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex flex-col sm:flex-row gap-3">
                 <div className="flex-grow">
                   <Input
-                    value={uri}
-                    onChange={(e) => setUri(e.target.value)}
+                    value={currentUri}
+                    onChange={(e) => setCurrentUri(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Enter' && uri && !isLoading) {
+                      if (e.key === 'Enter' && currentUri && !isLoading) {
                         e.preventDefault();
-                        loadSong();
+                        addSong();
                       }
                     }}
                     placeholder="https://tabs.ultimate-guitar.com/tab/..."
@@ -309,8 +525,8 @@ export default function ChordTransposer() {
                   />
                 </div>
                 <Button
-                  onClick={loadSong}
-                  disabled={isLoading || !uri}
+                  onClick={() => addSong()}
+                  disabled={isLoading || !currentUri}
                   className="min-w-[120px]"
                 >
                   {isLoading ? (
@@ -319,7 +535,10 @@ export default function ChordTransposer() {
                       Loading
                     </>
                   ) : (
-                    "Enter"
+                    <>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Add Song
+                    </>
                   )}
                 </Button>
               </div>
@@ -332,83 +551,196 @@ export default function ChordTransposer() {
               )}
             </CardContent>
           </Card>
-
-          {(artist || song) && (
-            <div className="mb-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div>
-                <h2 className="text-2xl font-bold text-slate-900 dark:text-white">{song}</h2>
-                <p className="text-lg text-slate-600 dark:text-slate-400">{artist}</p>
-              </div>
-
-              <Card className="w-full sm:w-auto border border-slate-200 dark:border-slate-800">
-                <CardContent className="p-3">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex flex-col items-center">
-                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">
-                        Transpose
-                      </div>
-                      <div className="flex items-center">
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          onClick={decrementTranspose}
-                          disabled={transposeStep <= -12}
-                          className="h-8 w-8"
-                        >
-                          <ChevronDown className="h-4 w-4" />
-                        </Button>
-                        <div className="w-10 text-center font-mono font-bold text-primary">
-                          {transposeStep > 0 ? `+${transposeStep}` : transposeStep}
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          onClick={incrementTranspose}
-                          disabled={transposeStep >= 12}
-                          className="h-8 w-8"
-                        >
-                          <ChevronUp className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </div>
-
-                    <Separator orientation="vertical" className="h-12" />
-
-                    <div className="flex flex-col items-center">
-                      <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-1">
-                        Font Size
-                      </div>
-                      <div className="flex items-center">
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          onClick={() => setFontSize((prev) => Math.max(prev - 1, 6))}
-                          disabled={fontSize <= 6}
-                          className="h-8 w-8"
-                        >
-                          <ChevronDown className="h-4 w-4" />
-                        </Button>
-                        <div className="w-10 text-center font-mono font-bold text-primary">
-                          {fontSize}pt
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          onClick={() => setFontSize((prev) => Math.min(prev + 1, 20))}
-                          disabled={fontSize >= 20}
-                          className="h-8 w-8"
-                        >
-                          <ChevronUp className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </div>
+{/*           
+          Song Library commented out for now
+          {savedSongs.length > 0 && (
+            <Card className="mb-6 border border-slate-200 dark:border-slate-800 shadow-md">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="text-lg flex items-center">
+                      <Library className="mr-2 h-5 w-5 text-primary" />
+                      Song Library ({savedSongs.length} {savedSongs.length === 1 ? 'song' : 'songs'})
+                    </CardTitle>
+                    <CardDescription>
+                      Your saved songs - click to add to setlist
+                    </CardDescription>
                   </div>
-                </CardContent>
-              </Card>
-            </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={clearLibrary}
+                    className="text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Clear Library
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="mb-4">
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-slate-400" />
+                    <Input
+                      value={librarySearch}
+                      onChange={(e) => setLibrarySearch(e.target.value)}
+                      placeholder="Search songs or artists..."
+                      className="pl-10 pr-10"
+                    />
+                    {librarySearch && (
+                      <button
+                        onClick={() => setLibrarySearch('')}
+                        className="absolute right-3 top-1/2 transform -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                  {savedSongs
+                    .filter(
+                      (s) =>
+                        s.song.toLowerCase().includes(librarySearch.toLowerCase()) ||
+                        s.artist.toLowerCase().includes(librarySearch.toLowerCase())
+                    )
+                    .sort((a, b) => b.addedAt - a.addedAt)
+                    .map((savedSong) => (
+                      <div
+                        key={savedSong.uri}
+                        className="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                      >
+                        <div className="flex-grow min-w-0 mr-3">
+                          <div className="font-semibold text-sm truncate">
+                            {savedSong.song}
+                          </div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                            {savedSong.artist}
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          onClick={() => addFromLibrary(savedSong)}
+                          disabled={isLoading}
+                        >
+                          <Plus className="mr-1 h-3 w-3" />
+                          Add
+                        </Button>
+                      </div>
+                    ))}
+                </div>
+
+                {librarySearch && savedSongs.filter(
+                  (s) =>
+                    s.song.toLowerCase().includes(librarySearch.toLowerCase()) ||
+                    s.artist.toLowerCase().includes(librarySearch.toLowerCase())
+                ).length === 0 && (
+                  <div className="text-center py-8 text-slate-500 dark:text-slate-400">
+                    No songs found matching "{librarySearch}"
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          */}
+
+          {songs.length > 0 && (
+            <Card className="mb-6 border border-slate-200 dark:border-slate-800 shadow-md">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg flex items-center">
+                  <List className="mr-2 h-5 w-5 text-primary" />
+                  Setlist ({songs.length} {songs.length === 1 ? 'song' : 'songs'})
+                </CardTitle>
+                <CardDescription>
+                  Reorder, transpose, or remove songs from your setlist
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {songs.map((songData, index) => (
+                    <div
+                      key={songData.id}
+                      className="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700"
+                    >
+                      <div className="flex flex-col gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => moveSongUp(index)}
+                          disabled={index === 0}
+                          className="h-6 w-6"
+                        >
+                          <ChevronUp className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => moveSongDown(index)}
+                          disabled={index === songs.length - 1}
+                          className="h-6 w-6"
+                        >
+                          <ChevronDown className="h-4 w-4" />
+                        </Button>
+                      </div>
+
+                      <div className="flex-grow min-w-0">
+                        <div className="font-semibold text-sm truncate">
+                          {songData.song}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                          {songData.artist}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                          Transpose:
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          onClick={() =>
+                            updateTranspose(songData.id, Math.max(songData.transposeStep - 1, -12))
+                          }
+                          disabled={songData.transposeStep <= -12}
+                          className="h-7 w-7"
+                        >
+                          <ChevronDown className="h-3 w-3" />
+                        </Button>
+                        <div className="w-12 text-center font-mono text-sm font-bold text-primary">
+                          {songData.transposeStep > 0
+                            ? `+${songData.transposeStep}`
+                            : songData.transposeStep}
+                        </div>
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          onClick={() =>
+                            updateTranspose(songData.id, Math.min(songData.transposeStep + 1, 12))
+                          }
+                          disabled={songData.transposeStep >= 12}
+                          className="h-7 w-7"
+                        >
+                          <ChevronUp className="h-3 w-3" />
+                        </Button>
+                      </div>
+
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => removeSong(songData.id)}
+                        className="h-8 w-8 text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
           )}
 
-          {transposedChords && (
+          {songs.length > 0 && (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <Card className="lg:col-span-2 border border-slate-200 dark:border-slate-800 shadow-md">
                 <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -495,40 +827,12 @@ export default function ChordTransposer() {
                 <Card className="border border-slate-200 dark:border-slate-800 shadow-md">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-lg flex items-center">
-                      <ArrowUpDown className="mr-2 h-5 w-5 text-primary" />
-                      Transpose Settings
+                      <FileText className="mr-2 h-5 w-5 text-primary" />
+                      PDF Settings
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
                     <div className="space-y-6">
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <Label htmlFor="transpose-slider">
-                            Transpose: {transposeStep > 0 ? `+${transposeStep}` : transposeStep}
-                          </Label>
-                          <span className="text-sm text-slate-500 dark:text-slate-400">
-                            {transposeStep > 0
-                              ? "Higher"
-                              : transposeStep < 0
-                              ? "Lower"
-                              : "Original"}
-                          </span>
-                        </div>
-                        <Slider
-                          id="transpose-slider"
-                          min={-12}
-                          max={12}
-                          step={1}
-                          value={[transposeStep]}
-                          onValueChange={(value) => setTransposeStep(value[0])}
-                        />
-                        <div className="flex justify-between text-xs text-slate-500 dark:text-slate-400">
-                          <span>-12</span>
-                          <span>0</span>
-                          <span>+12</span>
-                        </div>
-                      </div>
-
                       <div className="space-y-2">
                         <div className="flex justify-between">
                           <Label htmlFor="font-size-slider">
@@ -556,23 +860,6 @@ export default function ChordTransposer() {
                           <span>20pt</span>
                         </div>
                       </div>
-
-                      {/* 
-                        Example: "Simplify chords" setting, if needed.
-                        <div className="flex items-center space-x-2 pt-2">
-                          <Checkbox
-                            id="simplify"
-                            checked={simplify}
-                            onCheckedChange={(checked) => setSimplify(checked === true)}
-                          />
-                          <Label htmlFor="simplify" className="cursor-pointer">
-                            Simplify chords
-                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                              Remove extended, suspended, and added notes
-                            </p>
-                          </Label>
-                        </div>
-                      */}
                     </div>
                   </CardContent>
                 </Card>
@@ -581,7 +868,7 @@ export default function ChordTransposer() {
                   <CardHeader className="pb-3">
                     <CardTitle className="text-lg flex items-center">
                       <FileText className="mr-2 h-5 w-5 text-primary" />
-                      PDF Options
+                      Export Options
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
@@ -599,6 +886,49 @@ export default function ChordTransposer() {
                           </p>
                         </Label>
                       </div>
+
+                      <Separator />
+
+                      <div className="text-xs text-slate-500 dark:text-slate-400 font-medium">
+                        Export for Google Docs / Word
+                      </div>
+
+                      <Button
+                        onClick={handleDownloadDocx}
+                        disabled={songs.length === 0}
+                        className="w-full"
+                      >
+                        <FileType className="mr-2 h-4 w-4" />
+                        Download Word Doc (.docx)
+                      </Button>
+
+                      <div className="text-xs text-slate-500 dark:text-slate-400 text-center">
+                        Upload this file to Google Docs to preserve formatting
+                      </div>
+
+                      <Separator />
+
+                      <Button
+                        onClick={handleCopyToClipboard}
+                        disabled={songs.length === 0}
+                        variant="outline"
+                        className="w-full"
+                      >
+                        {copySuccess ? (
+                          <>
+                            <Check className="mr-2 h-4 w-4" />
+                            Copied to Clipboard!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="mr-2 h-4 w-4" />
+                            Copy as Plain Text
+                          </>
+                        )}
+                      </Button>
+
+                      <Separator />
+
                       <Button onClick={handleDownloadPDF} disabled={!pdfUrl} className="w-full">
                         <FileDown className="mr-2 h-4 w-4" />
                         Download PDF
@@ -610,17 +940,18 @@ export default function ChordTransposer() {
             </div>
           )}
 
-          {!transposedChords && !isLoading && (
+          {songs.length === 0 && !isLoading && (
             <Card className="border border-slate-200 dark:border-slate-800 shadow-md bg-slate-50 dark:bg-slate-900">
               <CardContent className="p-12">
                 <div className="flex flex-col items-center justify-center text-center space-y-4">
                   <Music2 className="h-16 w-16 text-slate-300 dark:text-slate-700" />
                   <h3 className="text-xl font-medium text-slate-700 dark:text-slate-300">
-                    Paste an Ultimate Guitar URL to get started
+                    Create your setlist
                   </h3>
                   <p className="text-slate-500 dark:text-slate-400 max-w-md">
-                    Enter a URL from Ultimate Guitar to load chord charts. You
-                    can then transpose, customize, and download them as a PDF.
+                    Add multiple songs from Ultimate Guitar to create a combined setlist.
+                    Each song can be transposed individually, and all songs will be combined
+                    into one PDF document.
                   </p>
                 </div>
               </CardContent>
@@ -646,8 +977,8 @@ export default function ChordTransposer() {
           pdfUrl={pdfUrl}
           isOpen={isFullScreen}
           onClose={() => setIsFullScreen(false)}
-          title={song}
-          subtitle={artist}
+          title={songs.length === 1 ? songs[0].song : `Setlist (${songs.length} songs)`}
+          subtitle={songs.length === 1 ? songs[0].artist : ''}
         />
       )}
     </div>
