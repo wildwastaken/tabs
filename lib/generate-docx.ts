@@ -6,8 +6,15 @@ import {
   Paragraph,
   TextRun,
   PageBreak,
+  UnderlineType,
   convertInchesToTwip,
 } from "docx"
+import type {
+  ExportSettings,
+  MonoFontOption,
+  PositionedNoteBox,
+} from "../types/setlist"
+import { parseInlineMarkdown } from "./inline-markdown"
 
 interface SongData {
   id: string
@@ -19,33 +26,35 @@ interface SongData {
   transposeStep: number
 }
 
+interface DocxRenderSettings {
+  monoFont: MonoFontOption
+  noteBoxes: PositionedNoteBox[]
+}
+
 /**
- * Generates a Word document from multiple songs that matches PDF exactly
- * @param songs Array of song data
- * @param fontSize The font size to use (in points)
- * @param autoLinebreak Whether to prevent paragraphs from splitting across pages
- * @returns Promise with Blob
+ * Generates a Word document from multiple songs.
  */
 export default async function generateDocx(
   songs: SongData[],
   fontSize: number,
-  autoLinebreak = false
+  autoLinebreak = false,
+  exportSettings?: Partial<ExportSettings>
 ): Promise<Blob> {
   if (songs.length === 0) {
     throw new Error("No songs to generate document from")
   }
 
+  const settings = resolveDocxRenderSettings(exportSettings)
+  const fontFamily = resolveDocxFontFamily(settings.monoFont)
   const paragraphs: Paragraph[] = []
 
-  // A4 dimensions in points (matching PDF)
-  const pageHeight = 842 // A4 height in points
-  const margin = 40 // Same as PDF
-  const lineHeight = fontSize * 1.5 // Same as PDF
+  const pageHeight = 842
+  const margin = 40
+  const lineHeight = fontSize * 1.5
 
-  for (let i = 0; i < songs.length; i++) {
+  for (let i = 0; i < songs.length; i += 1) {
     const song = songs[i]
 
-    // Add page break before each song except the first
     if (i > 0) {
       paragraphs.push(
         new Paragraph({
@@ -54,28 +63,25 @@ export default async function generateDocx(
       )
     }
 
-    // Track vertical position for this song (matching PDF's yPos logic)
     let currentY = margin
 
-    // Add artist name (bold, larger) - matching PDF exactly
     paragraphs.push(
       new Paragraph({
         children: [
           new TextRun({
             text: song.artist || "Unknown Artist",
             bold: true,
-            size: (fontSize + 4) * 2, // Convert to half-points
-            font: "Consolas", // Closest to RobotoMono on Windows/Mac
+            size: (fontSize + 4) * 2,
+            font: fontFamily,
           }),
         ],
         spacing: {
-          after: Math.floor((fontSize + 8) * 20), // Match PDF spacing
+          after: Math.floor((fontSize + 8) * 20),
         },
       })
     )
     currentY += fontSize + 8
 
-    // Add song title (bold, slightly larger) - matching PDF exactly
     paragraphs.push(
       new Paragraph({
         children: [
@@ -83,17 +89,16 @@ export default async function generateDocx(
             text: song.song || "Untitled",
             bold: true,
             size: (fontSize + 2) * 2,
-            font: "Consolas",
+            font: fontFamily,
           }),
         ],
         spacing: {
-          after: Math.floor((fontSize + 15) * 20), // Match PDF spacing
+          after: Math.floor((fontSize + 15) * 20),
         },
       })
     )
     currentY += fontSize + 15
 
-    // Process the chord content - exactly like PDF
     const formattedChords = song.transposedChords
       .replace(/\[tab\]/g, "")
       .replace(/\[\/tab\]/g, "")
@@ -101,24 +106,21 @@ export default async function generateDocx(
 
     const lines = formattedChords.split("\n")
 
-    // Apply auto-linebreak if enabled (same logic as PDF)
     const processedLines = autoLinebreak
       ? addParagraphBreaks(lines, pageHeight, margin, lineHeight, currentY)
       : lines
 
     for (const line of processedLines) {
-      // Check for forced page break marker
       if (line === "__PAGE_BREAK__") {
         paragraphs.push(
           new Paragraph({
             children: [new PageBreak()],
           })
         )
-        currentY = margin // Reset position after page break
+        currentY = margin
         continue
       }
 
-      // Check if we need a new page (matching PDF logic at line 165)
       if (currentY + lineHeight > pageHeight - margin) {
         paragraphs.push(
           new Paragraph({
@@ -129,7 +131,6 @@ export default async function generateDocx(
       }
 
       if (line.includes("[ch]") && line.includes("[/ch]")) {
-        // Line contains chords - parse and format them exactly like PDF
         const segments = line.split(/(\[ch\][^\[]*\[\/ch\])/)
         const textRuns: TextRun[] = []
 
@@ -137,25 +138,10 @@ export default async function generateDocx(
           if (!segment) continue
 
           if (segment.startsWith("[ch]") && segment.endsWith("[/ch]")) {
-            // This is a chord - extract and make it bold (matching PDF)
             const chordText = segment.substring(4, segment.length - 5)
-            textRuns.push(
-              new TextRun({
-                text: chordText,
-                bold: true,
-                font: "Consolas",
-                size: fontSize * 2,
-              })
-            )
+            textRuns.push(...markdownRuns(chordText, fontFamily, fontSize * 2, true))
           } else {
-            // Regular text - preserve all spaces
-            textRuns.push(
-              new TextRun({
-                text: segment,
-                font: "Consolas",
-                size: fontSize * 2,
-              })
-            )
+            textRuns.push(...markdownRuns(segment, fontFamily, fontSize * 2, false))
           }
         }
 
@@ -164,22 +150,15 @@ export default async function generateDocx(
             children: textRuns,
             spacing: {
               after: 0,
-              line: Math.floor(lineHeight * 20), // Exact line height from PDF
+              line: Math.floor(lineHeight * 20),
               lineRule: "exact",
             },
           })
         )
       } else {
-        // Regular line without chords - preserve exact spacing
         paragraphs.push(
           new Paragraph({
-            children: [
-              new TextRun({
-                text: line,
-                font: "Consolas",
-                size: fontSize * 2,
-              }),
-            ],
+            children: markdownRuns(line, fontFamily, fontSize * 2, false),
             spacing: {
               after: 0,
               line: Math.floor(lineHeight * 20),
@@ -189,19 +168,78 @@ export default async function generateDocx(
         )
       }
 
-      // Move down by one line (matching PDF's yPos += lineHeight)
       currentY += lineHeight
     }
   }
 
-  // Create the document with A4 page size and matching margins
+  if (settings.noteBoxes.length > 0) {
+    paragraphs.push(
+      new Paragraph({
+        children: [new PageBreak()],
+      })
+    )
+
+    paragraphs.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: "PDF Note Boxes",
+            bold: true,
+            font: fontFamily,
+            size: (fontSize + 2) * 2,
+          }),
+        ],
+        spacing: { after: 180 },
+      })
+    )
+
+    settings.noteBoxes
+      .slice()
+      .sort((a, b) => a.page - b.page)
+      .forEach(noteBox => {
+        paragraphs.push(
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: `Page ${noteBox.page} (${Math.round(noteBox.x * 100)}%, ${Math.round(noteBox.y * 100)}%)`,
+                bold: true,
+                font: fontFamily,
+                size: fontSize * 2,
+              }),
+            ],
+            spacing: { after: 80 },
+          })
+        )
+
+        noteBox.text.split("\n").forEach(line => {
+          paragraphs.push(
+            new Paragraph({
+              children: markdownRuns(line, fontFamily, fontSize * 2, false),
+              spacing: {
+                after: 0,
+                line: Math.floor(lineHeight * 20),
+                lineRule: "exact",
+              },
+            })
+          )
+        })
+
+        paragraphs.push(
+          new Paragraph({
+            children: [new TextRun({ text: "" })],
+            spacing: { after: 120 },
+          })
+        )
+      })
+  }
+
   const doc = new Document({
     sections: [
       {
         properties: {
           page: {
             margin: {
-              top: convertInchesToTwip(40 / 72), // 40pt to inches to twips
+              top: convertInchesToTwip(40 / 72),
               bottom: convertInchesToTwip(40 / 72),
               left: convertInchesToTwip(40 / 72),
               right: convertInchesToTwip(40 / 72),
@@ -213,14 +251,72 @@ export default async function generateDocx(
     ],
   })
 
-  // Generate blob
-  const blob = await Packer.toBlob(doc)
-  return blob
+  return Packer.toBlob(doc)
+}
+
+function resolveDocxRenderSettings(
+  input?: Partial<ExportSettings>
+): DocxRenderSettings {
+  return {
+    monoFont: input?.monoFont || "roboto-mono",
+    noteBoxes: Array.isArray(input?.noteBoxes) ? input.noteBoxes : [],
+  }
+}
+
+function resolveDocxFontFamily(monoFont: MonoFontOption): string {
+  switch (monoFont) {
+    case "courier-new":
+      return "Courier New"
+    case "consolas":
+      return "Consolas"
+    case "menlo":
+      return "Menlo"
+    case "roboto-mono":
+    default:
+      return "Consolas"
+  }
+}
+
+function markdownRuns(
+  text: string,
+  fontFamily: string,
+  size: number,
+  forceBold: boolean
+): TextRun[] {
+  const segments = parseInlineMarkdown(text)
+  const runs: TextRun[] = []
+
+  for (const segment of segments) {
+    if (segment.text.length === 0) continue
+
+    runs.push(
+      new TextRun({
+        text: segment.text,
+        bold: forceBold || segment.bold,
+        underline: segment.underline
+          ? { type: UnderlineType.SINGLE }
+          : undefined,
+        font: fontFamily,
+        size,
+      })
+    )
+  }
+
+  if (runs.length > 0) {
+    return runs
+  }
+
+  return [
+    new TextRun({
+      text: "",
+      font: fontFamily,
+      size,
+    }),
+  ]
 }
 
 /**
- * Detect song sections and add page breaks to avoid splitting them across pages
- * (Same logic as PDF generation)
+ * Detect song sections and add page breaks to avoid splitting them across pages.
  */
 function addParagraphBreaks(
   lines: string[],
@@ -234,11 +330,9 @@ function addParagraphBreaks(
   const usableHeight = pageHeight - margin * 2
   const maxLinesPerPage = Math.floor(usableHeight / lineHeight)
 
-  // Calculate how many lines are already used on the first page (accounting for header)
   const firstPageUsedLines = Math.ceil((startY - margin) / lineHeight)
   const firstPageAvailableLines = maxLinesPerPage - firstPageUsedLines
 
-  // Helper function to detect if a line is a section header
   const isSectionHeader = (line: string): boolean => {
     const trimmed = line.trim()
     return (
@@ -249,11 +343,10 @@ function addParagraphBreaks(
     )
   }
 
-  // Split content into sections
   const sections: string[][] = []
   let currentSection: string[] = []
 
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]
     const isHeader = isSectionHeader(line)
     const isEmptyLine = line.trim() === ""
@@ -289,15 +382,13 @@ function addParagraphBreaks(
     sections.push(currentSection)
   }
 
-  // Process sections and add page breaks as needed (matching PDF logic exactly)
   let currentPageLines = 0
   let currentPageNumber = 1
 
-  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+  for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex += 1) {
     const section = sections[sectionIndex]
     const sectionLines = section.length
 
-    // Determine available lines on current page (matching PDF logic)
     const availableLinesOnCurrentPage =
       currentPageNumber === 1
         ? firstPageAvailableLines - currentPageLines
@@ -305,34 +396,26 @@ function addParagraphBreaks(
 
     const sectionWouldBeSplit = sectionLines > availableLinesOnCurrentPage
     const sectionFitsOnNewPage = sectionLines <= maxLinesPerPage
-    const minimumLinesToJustifyBreak = 3
-    const wouldSaveEnoughLines = sectionLines >= minimumLinesToJustifyBreak
 
-    if (
-      sectionWouldBeSplit &&
-      currentPageLines > 0 &&
-      sectionFitsOnNewPage &&
-      wouldSaveEnoughLines
-    ) {
+    if (sectionWouldBeSplit && currentPageLines > 0 && sectionFitsOnNewPage) {
       processedLines.push("__PAGE_BREAK__")
       currentPageLines = 0
-      currentPageNumber++
+      currentPageNumber += 1
     }
 
     processedLines.push(...section)
     currentPageLines += sectionLines
 
-    // Check if we've exceeded the page capacity (matching PDF logic)
     const currentPageCapacity =
       currentPageNumber === 1 ? firstPageAvailableLines : maxLinesPerPage
 
     if (currentPageLines >= currentPageCapacity) {
       currentPageLines = currentPageLines - currentPageCapacity
-      currentPageNumber++
+      currentPageNumber += 1
 
       while (currentPageLines >= maxLinesPerPage) {
         currentPageLines -= maxLinesPerPage
-        currentPageNumber++
+        currentPageNumber += 1
       }
     }
   }

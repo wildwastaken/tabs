@@ -1,0 +1,18 @@
+0 verbose cli /Users/allenliu/.nvm/versions/node/v20.17.0/bin/node /Users/allenliu/.nvm/versions/node/v20.17.0/bin/npm
+1 info using npm@11.2.0
+2 info using node@v20.17.0
+3 silly config load:file:/Users/allenliu/.nvm/versions/node/v20.17.0/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/allenliu/Desktop/Projects/tabs/.npmrc
+5 silly config load:file:/Users/allenliu/Desktop/Projects/tabs/.home/.npmrc
+6 silly config load:file:/Users/allenliu/.nvm/versions/node/v20.17.0/etc/npmrc
+7 verbose title npm run build
+8 verbose argv "run" "build"
+9 verbose logfile logs-max:10 dir:/Users/allenliu/Desktop/Projects/tabs/.home/.npm/_logs/2026-02-20T16_50_06_727Z-
+10 verbose logfile /Users/allenliu/Desktop/Projects/tabs/.home/.npm/_logs/2026-02-20T16_50_06_727Z-debug-0.log
+11 silly logfile done cleaning log files
+12 verbose cwd /Users/allenliu/Desktop/Projects/tabs
+13 verbose os Darwin 25.2.0
+14 verbose node v20.17.0
+15 verbose npm  v11.2.0
+16 verbose exit 1
+17 verbose code 1
