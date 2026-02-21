@@ -1,14 +1,10 @@
 import type { NextApiRequest, NextApiResponse } from "next"
-import { promises as fs } from "fs"
-import path from "path"
 import type {
   MonoFontOption,
   PositionedNoteBox,
   PublicTabEntry,
-  PublicTabsDb,
 } from "../../types/setlist"
 
-const DATA_FILE_PATH = path.join(process.cwd(), "data", "public-tabs.json")
 const DB_CONNECTION_URL =
   process.env.NETLIFY_DATABASE_URL || process.env.DATABASE_URL || ""
 const DELETE_PASSWORD = (process.env.TABS_DELETE_PASSWORD || "").trim()
@@ -72,10 +68,7 @@ interface PgPoolLike {
   ): Promise<PgQueryResult<Row>>
 }
 
-const defaultDb: PublicTabsDb = { version: 1, tabs: [] }
-
-let dbPoolPromise: Promise<PgPoolLike | null> | null = null
-let warnedDbFallback = false
+let dbPoolPromise: Promise<PgPoolLike> | null = null
 
 function sanitizeText(input: unknown, maxLength: number): string {
   if (typeof input !== "string") return ""
@@ -183,8 +176,12 @@ async function ensureDbSchema(pool: PgPoolLike): Promise<void> {
   )
 }
 
-async function getDbPool(): Promise<PgPoolLike | null> {
-  if (!DB_CONNECTION_URL) return null
+async function getDbPool(): Promise<PgPoolLike> {
+  if (!DB_CONNECTION_URL) {
+    throw new Error(
+      "Missing DB connection string. Set NETLIFY_DATABASE_URL or DATABASE_URL."
+    )
+  }
 
   if (!dbPoolPromise) {
     dbPoolPromise = (async () => {
@@ -202,14 +199,8 @@ async function getDbPool(): Promise<PgPoolLike | null> {
         await ensureDbSchema(pool)
         return pool
       } catch (error) {
-        if (!warnedDbFallback) {
-          warnedDbFallback = true
-          console.error(
-            "DB connection unavailable, falling back to file storage. Ensure `pg` is installed in production.",
-            error
-          )
-        }
-        return null
+        dbPoolPromise = null
+        throw error
       }
     })()
   }
@@ -291,63 +282,6 @@ async function deleteTabFromDb(pool: PgPoolLike, id: string): Promise<boolean> {
   return result.rows.length > 0
 }
 
-async function readDb(): Promise<PublicTabsDb> {
-  try {
-    const fileContents = await fs.readFile(DATA_FILE_PATH, "utf8")
-    const parsed = JSON.parse(fileContents)
-
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      Array.isArray((parsed as PublicTabsDb).tabs)
-    ) {
-      return {
-        version:
-          typeof (parsed as PublicTabsDb).version === "number"
-            ? (parsed as PublicTabsDb).version
-            : 1,
-        tabs: (parsed as PublicTabsDb).tabs,
-      }
-    }
-
-    return defaultDb
-  } catch {
-    return defaultDb
-  }
-}
-
-async function writeDb(db: PublicTabsDb): Promise<void> {
-  await fs.mkdir(path.dirname(DATA_FILE_PATH), { recursive: true })
-  await fs.writeFile(DATA_FILE_PATH, JSON.stringify(db, null, 2), "utf8")
-}
-
-async function listTabsFromFile(): Promise<PublicTabEntry[]> {
-  const db = await readDb()
-  return db.tabs
-}
-
-async function insertTabIntoFile(entry: PublicTabEntry): Promise<void> {
-  const db = await readDb()
-  const updatedDb: PublicTabsDb = {
-    version: 1,
-    tabs: [entry, ...db.tabs].slice(0, MAX_TABS),
-  }
-  await writeDb(updatedDb)
-}
-
-async function deleteTabFromFile(id: string): Promise<boolean> {
-  const db = await readDb()
-  const remainingTabs = db.tabs.filter(tab => tab.id !== id)
-  if (remainingTabs.length === db.tabs.length) return false
-
-  await writeDb({
-    version: db.version || 1,
-    tabs: remainingTabs,
-  })
-
-  return true
-}
-
 async function sendPublishLogToDiscord(
   rawPayload: PublishPayload,
   entry: PublicTabEntry
@@ -401,11 +335,14 @@ export default async function handler(
   if (req.method === "GET") {
     try {
       const pool = await getDbPool()
-      const tabs = pool ? await listTabsFromDb(pool) : await listTabsFromFile()
+      const tabs = await listTabsFromDb(pool)
       res.status(200).json({ tabs })
     } catch (error) {
       console.error("Failed to load public tabs:", error)
-      res.status(500).json({ error: "Failed to load public tabs." })
+      res.status(500).json({
+        error:
+          "Database unavailable for public tabs. Check NETLIFY_DATABASE_URL and pg installation.",
+      })
     }
     return
   }
@@ -454,11 +391,7 @@ export default async function handler(
 
     try {
       const pool = await getDbPool()
-      if (pool) {
-        await insertTabIntoDb(pool, newEntry)
-      } else {
-        await insertTabIntoFile(newEntry)
-      }
+      await insertTabIntoDb(pool, newEntry)
 
       await sendPublishLogToDiscord(payload, newEntry)
 
@@ -467,7 +400,7 @@ export default async function handler(
       console.error("Failed to persist public tab:", error)
       res.status(500).json({
         error:
-          "Failed to persist public tab data. Verify DB configuration or file write permissions.",
+          "Failed to persist public tab data. Verify NETLIFY_DATABASE_URL and pg installation.",
       })
     }
     return
@@ -493,9 +426,7 @@ export default async function handler(
 
     try {
       const pool = await getDbPool()
-      const deleted = pool
-        ? await deleteTabFromDb(pool, id)
-        : await deleteTabFromFile(id)
+      const deleted = await deleteTabFromDb(pool, id)
 
       if (!deleted) {
         res.status(404).json({ error: "Tab not found." })
