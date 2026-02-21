@@ -7,4 +7,20 @@
 
 [functions]
   external_node_modules = ["pg"]
-  included_files = ["node_modules/pg/**", "node_modules/pg-protocol/**", "node_modules/pg-pool/**", "node_modules/pg-types/**", "node_modules/pgpass/**", "node_modules/pg-connection-string/**"]
+  included_files = [
+    "node_modules/pg/**",
+    "node_modules/pg-protocol/**",
+    "node_modules/pg-pool/**",
+    "node_modules/pg-types/**",
+    "node_modules/pgpass/**",
+    "node_modules/pg-connection-string/**",
+    "node_modules/postgres-array/**",
+    "node_modules/postgres-bytea/**",
+    "node_modules/postgres-date/**",
+    "node_modules/postgres-interval/**",
+    "node_modules/postgres-range/**",
+    "node_modules/xtend/**",
+    "node_modules/split2/**",
+    "node_modules/obuf/**",
+    "node_modules/packet-reader/**"
+  ]
