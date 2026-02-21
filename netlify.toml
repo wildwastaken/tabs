@@ -22,5 +22,6 @@
     "node_modules/xtend/**",
     "node_modules/split2/**",
     "node_modules/obuf/**",
-    "node_modules/packet-reader/**"
+    "node_modules/packet-reader/**",
+    "node_modules/pg-int8/**"
   ]
