@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
     ignoreDuringBuilds: true,
   },
   outputFileTracingRoot: process.cwd(),
+  serverExternalPackages: ["pg"],
 }
 
 export default nextConfig
