@@ -330,6 +330,8 @@ export default function ChordTransposer() {
   const [publishSongTitle, setPublishSongTitle] = useState("")
   const [publishSongAuthor, setPublishSongAuthor] = useState("")
   const [previewPublicTab, setPreviewPublicTab] = useState<PublicTabEntry | null>(null)
+  const [publicTabsSearch, setPublicTabsSearch] = useState("")
+  const [publicSongSearch, setPublicSongSearch] = useState("")
   const [deletePassword, setDeletePassword] = useState("")
   const [isNotesPanelOpen, setIsNotesPanelOpen] = useState(false)
   const [isAdvancedExportOpen, setIsAdvancedExportOpen] = useState(false)
@@ -546,6 +548,30 @@ export default function ChordTransposer() {
     () => noteBoxes.find(box => box.id === selectedNoteId) || null,
     [noteBoxes, selectedNoteId]
   )
+
+  const filteredPublicTabs = useMemo(() => {
+    const query = publicTabsSearch.trim().toLowerCase()
+    if (!query) return publicTabs
+
+    return publicTabs.filter(tab => {
+      const songMetadata = tab.songs
+        .map(song => `${song.song} ${song.artist}`)
+        .join(" ")
+      const searchableText = `${tab.setlistTitle} ${tab.publisherName} ${songMetadata}`.toLowerCase()
+      return searchableText.includes(query)
+    })
+  }, [publicTabs, publicTabsSearch])
+
+  const filteredPreviewSongs = useMemo(() => {
+    const songsForPreview = previewPublicTab?.songs || []
+    const query = publicSongSearch.trim().toLowerCase()
+    if (!query) return songsForPreview
+
+    return songsForPreview.filter(song => {
+      const searchableText = `${song.song} ${song.artist} ${stripChordMarkup(song.transposedChords)}`.toLowerCase()
+      return searchableText.includes(query)
+    })
+  }, [previewPublicTab, publicSongSearch])
 
   useEffect(() => {
     if (!selectedNoteId) return
@@ -774,6 +800,7 @@ export default function ChordTransposer() {
   )
 
   const openPublicTabPreview = useCallback((publicTab: PublicTabEntry) => {
+    setPublicSongSearch("")
     setPreviewPublicTab(publicTab)
   }, [])
 
@@ -1268,8 +1295,7 @@ export default function ChordTransposer() {
                 Public Tabs
               </CardTitle>
               <CardDescription>
-                Anyone can publish here. Delete can be password-gated by setting{" "}
-                <code>TABS_DELETE_PASSWORD</code> on the server.
+                Anyone can publish here. Get the delete password from Allen.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -1322,6 +1348,13 @@ export default function ChordTransposer() {
                 </div>
               </div>
 
+              <Input
+                value={publicTabsSearch}
+                onChange={e => setPublicTabsSearch(e.target.value)}
+                placeholder="Search by song, artist, setlist, or publisher"
+                className="mt-3"
+              />
+
               {publishMessage && (
                 <div className="mt-3 p-2 rounded-md bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400 text-sm">
                   {publishMessage}
@@ -1338,8 +1371,12 @@ export default function ChordTransposer() {
                   <p className="text-sm text-slate-500 dark:text-slate-400">
                     No public tabs yet. Publish your current setlist to start.
                   </p>
+                ) : filteredPublicTabs.length === 0 ? (
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    No matching tabs found.
+                  </p>
                 ) : (
-	                  publicTabs.map(publicTab => (
+	                  filteredPublicTabs.map(publicTab => (
 	                    <div
 	                      key={publicTab.id}
 	                      className="p-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 flex items-center justify-between gap-3"
@@ -2172,11 +2209,12 @@ export default function ChordTransposer() {
         open={previewPublicTab !== null}
         onOpenChange={open => {
           if (!open) {
+            setPublicSongSearch("")
             setPreviewPublicTab(null)
           }
         }}
       >
-        <DialogContent className="flex items-center justify-center p-4">
+        <DialogContent className="flex items-start justify-center overflow-y-auto p-4">
           <Card className="w-full max-w-4xl border border-slate-200 dark:border-slate-800 shadow-xl">
             <CardHeader className="pb-3">
               <CardTitle className="text-xl">
@@ -2189,20 +2227,31 @@ export default function ChordTransposer() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="max-h-[62vh] overflow-y-auto space-y-3 pr-1">
-                {(previewPublicTab?.songs || []).map((song, index) => (
-                  <div
-                    key={`${previewPublicTab?.id || "preview"}-${index}`}
-                    className="rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-3"
-                  >
-                    <div className="text-sm font-semibold">
-                      {song.song} <span className="text-slate-500">• {song.artist}</span>
+              <Input
+                value={publicSongSearch}
+                onChange={e => setPublicSongSearch(e.target.value)}
+                placeholder="Search songs in this tab"
+              />
+              <div className="space-y-3">
+                {filteredPreviewSongs.length === 0 ? (
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    No songs match your search.
+                  </p>
+                ) : (
+                  filteredPreviewSongs.map((song, index) => (
+                    <div
+                      key={`${previewPublicTab?.id || "preview"}-${index}`}
+                      className="rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-3"
+                    >
+                      <div className="text-sm font-semibold">
+                        {song.song} <span className="text-slate-500">• {song.artist}</span>
+                      </div>
+                      <pre className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-slate-700 dark:text-slate-300 font-mono">
+                        {stripChordMarkup(song.transposedChords)}
+                      </pre>
                     </div>
-                    <pre className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-slate-700 dark:text-slate-300 font-mono">
-                      {stripChordMarkup(song.transposedChords)}
-                    </pre>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
               <div className="flex items-center justify-end gap-2 pt-2">
                 <Button variant="outline" onClick={() => setPreviewPublicTab(null)}>
