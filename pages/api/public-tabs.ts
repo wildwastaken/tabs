@@ -8,9 +8,7 @@ import type {
 const DB_CONNECTION_URL =
   process.env.NETLIFY_DATABASE_URL || process.env.DATABASE_URL || ""
 const DELETE_PASSWORD = (process.env.TABS_DELETE_PASSWORD || "").trim()
-const DISCORD_WEBHOOK_URL =
-  process.env.DISCORD_PUBLISH_WEBHOOK_URL ||
-  "https://discord.com/api/webhooks/1474522347028480070/NjgvqHikQDt-psacDoJNthq9TOdInj9PX11BpFTtl3Z8d4N_ykxyVyUj6ODzIY2hreW1"
+const DISCORD_WEBHOOK_URL = (process.env.DISCORD_PUBLISH_WEBHOOK_URL || "").trim()
 
 const MAX_TABS = 300
 const MAX_SONGS_PER_TAB = 40
@@ -317,14 +315,11 @@ async function sendPublishLogToDiscord(
     })
 
     if (!response.ok) {
-      const body = await response.text()
-      console.error(
-        `Discord webhook failed (${response.status}):`,
-        body.slice(0, 600)
-      )
+      console.error(`Discord webhook failed (${response.status})`)
     }
-  } catch (error) {
-    console.error("Failed to send Discord publish log:", error)
+  } catch {
+    // Fetch errors can contain the request URL, including the webhook token.
+    console.error("Failed to send Discord publish log")
   }
 }
 
