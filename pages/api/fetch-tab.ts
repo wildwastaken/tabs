@@ -45,10 +45,14 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const tabUrl = normalizeUltimateGuitarUrl(rawUrl)
 
+  // Never let the CDN cache this: Netlify's Next.js caching ignores the query
+  // string, so a cached response would be served for every other tab URL.
+  res.setHeader("Cache-Control", "private, no-store, max-age=0")
+  res.setHeader("Netlify-Vary", "query")
+
   try {
     const tab = await fetchFromTabPage(tabUrl)
-    res.setHeader("Cache-Control", "s-maxage=86400, stale-while-revalidate=604800")
-    return res.status(200).json(tab)
+    return res.status(200).json({ ...tab, sourceUrl: tabUrl })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error("fetch-tab failed for", tabUrl, message)

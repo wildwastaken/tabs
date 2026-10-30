@@ -189,16 +189,25 @@ function pluralize(count: number, singular: string, plural = `${singular}s`) {
 
 async function fetchUltimateGuitarTab(rawUrl: string): Promise<UltimateGuitarTab> {
   const tabUrl = normalizeUltimateGuitarUrl(rawUrl)
+  let serverFailure = ""
 
   try {
-    const res = await fetch(`/api/fetch-tab?url=${encodeURIComponent(tabUrl)}`)
-    if (res.ok) {
-      const tab = (await res.json()) as UltimateGuitarTab
-      if (tab.content) return tab
+    const res = await fetch(`/api/fetch-tab?url=${encodeURIComponent(tabUrl)}`, {
+      cache: "no-store",
+    })
+    const body = (await res.json()) as Partial<UltimateGuitarTab> & {
+      sourceUrl?: string
+      details?: string
     }
+    // Guard against a cached response for a different tab.
+    if (res.ok && body.content && body.sourceUrl === tabUrl) {
+      return body as UltimateGuitarTab
+    }
+    serverFailure = body.details || (res.ok ? "response was for a different tab" : `status ${res.status}`)
   } catch (err) {
-    console.warn("Server tab fetch failed, trying browser proxies:", err)
+    serverFailure = err instanceof Error ? err.message : String(err)
   }
+  console.warn("Server tab fetch failed, trying browser proxies:", serverFailure)
 
   for (const buildProxyUrl of CLIENT_PROXIES) {
     try {
@@ -211,7 +220,7 @@ async function fetchUltimateGuitarTab(rawUrl: string): Promise<UltimateGuitarTab
     }
   }
 
-  throw new Error("Could not load chords for this link.")
+  throw new Error(serverFailure || "Could not load chords for this link.")
 }
 
 // Renders [ch]G[/ch] markup with chord names highlighted for on-screen reading.
@@ -754,6 +763,7 @@ export default function ChordTransposer() {
 
     const failed: string[] = []
     let added = 0
+    let lastFailureReason = ""
 
     for (const [index, url] of urls.entries()) {
       try {
@@ -772,6 +782,7 @@ export default function ChordTransposer() {
       } catch (err) {
         console.error("Failed to load song:", url, err)
         failed.push(url)
+        if (err instanceof Error) lastFailureReason = err.message
       }
       setLoadingProgress({ done: index + 1, total: urls.length })
     }
@@ -783,7 +794,7 @@ export default function ChordTransposer() {
       setError(
         `Couldn't load ${pluralize(failed.length, "link")}. ${
           added > 0 ? `Added ${pluralize(added, "song")}. ` : ""
-        }Check the link${failed.length === 1 ? "" : "s"} left in the box, or paste the tab text instead.`
+        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box, or paste the tab text instead.`
       )
     } else {
       showNotice(`Added ${pluralize(added, "song")}`)
