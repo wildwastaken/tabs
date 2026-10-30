@@ -1,26 +1,28 @@
 import type { NextApiRequest, NextApiResponse } from "next"
-import type {
-  MonoFontOption,
-  PositionedNoteBox,
-  PublicTabEntry,
-} from "../../types/setlist"
+import type { PublicTabEntry } from "../../types/setlist"
+import {
+  describeDbError,
+  getDbPool,
+  isEditPasswordValid,
+  toIsoString,
+  type PgPoolLike,
+} from "../../lib/db"
+import {
+  MAX_CHORDS_LENGTH,
+  MAX_NOTES_LENGTH,
+  MAX_TEXT_LENGTH,
+  parseJsonArray,
+  parseJsonObject,
+  sanitizeMonoFont,
+  sanitizeNoteBoxes,
+  sanitizeText,
+  sanitizeTransposeStep,
+} from "../../lib/validation"
 
-const DB_CONNECTION_URL =
-  process.env.NETLIFY_DATABASE_URL || process.env.DATABASE_URL || ""
-const DELETE_PASSWORD = (process.env.TABS_DELETE_PASSWORD || "").trim()
 const DISCORD_WEBHOOK_URL = (process.env.DISCORD_PUBLISH_WEBHOOK_URL || "").trim()
 
-const MAX_TABS = 300
+const MAX_TABS = 1000
 const MAX_SONGS_PER_TAB = 40
-const MAX_TEXT_LENGTH = 250
-const MAX_NOTES_LENGTH = 6000
-const MAX_CHORDS_LENGTH = 40000
-const ALLOWED_MONO_FONTS: MonoFontOption[] = [
-  "roboto-mono",
-  "courier-new",
-  "consolas",
-  "menlo",
-]
 
 interface PublishPayloadSong {
   artist?: unknown
@@ -45,35 +47,21 @@ interface DeletePayload {
   password?: unknown
 }
 
+interface UpdatePayload extends DeletePayload {
+  publisherName?: unknown
+  setlistTitle?: unknown
+  songs?: unknown
+}
+
 interface PublicTabRow extends Record<string, unknown> {
   id: string
   publisher_name: string
   setlist_title: string
   published_at: string | Date
+  updated_at: string | Date | null
   notes: string
   export_settings: unknown
   songs: unknown
-}
-
-interface PgQueryResult<Row extends Record<string, unknown>> {
-  rows: Row[]
-}
-
-interface PgPoolLike {
-  query<Row extends Record<string, unknown> = Record<string, unknown>>(
-    queryText: string,
-    params?: unknown[]
-  ): Promise<PgQueryResult<Row>>
-}
-
-let dbPoolPromise: Promise<PgPoolLike> | null = null
-
-function sanitizeText(input: unknown, maxLength: number): string {
-  if (typeof input !== "string") return ""
-  return input
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
-    .trim()
-    .slice(0, maxLength)
 }
 
 function sanitizeSongs(rawSongs: unknown): PublicTabEntry["songs"] {
@@ -83,10 +71,7 @@ function sanitizeSongs(rawSongs: unknown): PublicTabEntry["songs"] {
     .slice(0, MAX_SONGS_PER_TAB)
     .map((song): PublishPayloadSong => (song && typeof song === "object" ? song : {}))
     .map(song => {
-      const transposeStep =
-        typeof song.transposeStep === "number" && Number.isFinite(song.transposeStep)
-          ? Math.max(-12, Math.min(12, Math.round(song.transposeStep)))
-          : 0
+      const transposeStep = sanitizeTransposeStep(song.transposeStep)
 
       return {
         artist: sanitizeText(song.artist, MAX_TEXT_LENGTH) || "Unknown Artist",
@@ -98,155 +83,19 @@ function sanitizeSongs(rawSongs: unknown): PublicTabEntry["songs"] {
     .filter(song => song.transposedChords.length > 0)
 }
 
-function sanitizeNoteBoxes(rawNoteBoxes: unknown): PositionedNoteBox[] {
-  if (!Array.isArray(rawNoteBoxes)) return []
-
-  return rawNoteBoxes
-    .slice(0, 120)
-    .map(entry => (entry && typeof entry === "object" ? entry : {}))
-    .map(entry => {
-      const note = entry as Record<string, unknown>
-      const page =
-        typeof note.page === "number" && Number.isFinite(note.page)
-          ? Math.max(1, Math.min(999, Math.round(note.page)))
-          : 1
-
-      const clampPercent = (value: unknown, fallback: number): number =>
-        typeof value === "number" && Number.isFinite(value)
-          ? Math.max(0, Math.min(1, value))
-          : fallback
-
-      return {
-        id:
-          sanitizeText(note.id, 80) ||
-          `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        page,
-        x: clampPercent(note.x, 0.65),
-        y: clampPercent(note.y, 0.1),
-        width: clampPercent(note.width, 0.25),
-        height: clampPercent(note.height, 0.2),
-        text: sanitizeText(note.text, MAX_NOTES_LENGTH),
-      }
-    })
-}
-
-function parseJsonObject(input: unknown): Record<string, unknown> {
-  if (input && typeof input === "object" && !Array.isArray(input)) {
-    return input as Record<string, unknown>
-  }
-
-  if (typeof input === "string") {
-    try {
-      const parsed = JSON.parse(input)
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>
-      }
-    } catch {}
-  }
-
-  return {}
-}
-
-function parseJsonArray(input: unknown): unknown[] {
-  if (Array.isArray(input)) return input
-
-  if (typeof input === "string") {
-    try {
-      const parsed = JSON.parse(input)
-      if (Array.isArray(parsed)) return parsed
-    } catch {}
-  }
-
-  return []
-}
-
-async function ensureDbSchema(pool: PgPoolLike): Promise<void> {
-  await pool.query(
-    `CREATE TABLE IF NOT EXISTS public_tabs (
-      id TEXT PRIMARY KEY,
-      publisher_name TEXT NOT NULL,
-      setlist_title TEXT NOT NULL,
-      published_at TIMESTAMPTZ NOT NULL,
-      notes TEXT NOT NULL DEFAULT '',
-      export_settings JSONB NOT NULL,
-      songs JSONB NOT NULL
-    )`
-  )
-}
-
-async function getDbPool(): Promise<PgPoolLike> {
-  if (!DB_CONNECTION_URL) {
-    throw new Error(
-      "Missing DB connection string. Set NETLIFY_DATABASE_URL or DATABASE_URL."
-    )
-  }
-
-  if (!dbPoolPromise) {
-    dbPoolPromise = (async () => {
-      try {
-        // A plain require (not eval'd) so the build traces pg into the
-        // serverless function; Vercel only ships files it can trace.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const pgModule = require("pg") as {
-          Pool: new (config: Record<string, unknown>) => PgPoolLike
-        }
-
-        const pool = new pgModule.Pool({
-          connectionString: DB_CONNECTION_URL,
-          ssl: { rejectUnauthorized: false },
-        })
-
-        await ensureDbSchema(pool)
-        return pool
-      } catch (error) {
-        dbPoolPromise = null
-        throw error
-      }
-    })()
-  }
-
-  return dbPoolPromise
-}
-
-// User-facing reason for a database failure. Never includes the connection string.
-function describeDbError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error)
-  const code =
-    error && typeof error === "object" && "code" in error
-      ? String((error as { code: unknown }).code)
-      : ""
-
-  if (!DB_CONNECTION_URL) {
-    return "Public tabs database isn't configured: set NETLIFY_DATABASE_URL (or DATABASE_URL) for this deployment and redeploy."
-  }
-  if (/Cannot find module ['"]pg['"]/.test(message)) {
-    return "Public tabs database driver (pg) is missing from this deployment."
-  }
-  if (code === "28P01" || /password authentication failed/i.test(message)) {
-    return "Public tabs database rejected the login. Check the NETLIFY_DATABASE_URL value."
-  }
-  return `Couldn't connect to the public tabs database${code ? ` (${code})` : ""}. Check NETLIFY_DATABASE_URL.`
-}
-
 function mapDbRowToPublicTabEntry(row: PublicTabRow): PublicTabEntry {
   const exportSettingsRaw = parseJsonObject(row.export_settings)
   const sanitizedSongs = sanitizeSongs(parseJsonArray(row.songs))
 
-  const rawMonoFont = exportSettingsRaw.monoFont
-  const monoFont: MonoFontOption =
-    typeof rawMonoFont === "string" &&
-    ALLOWED_MONO_FONTS.includes(rawMonoFont as MonoFontOption)
-      ? (rawMonoFont as MonoFontOption)
-      : "roboto-mono"
+  const monoFont = sanitizeMonoFont(exportSettingsRaw.monoFont)
+  const publishedAt = toIsoString(row.published_at)
 
   return {
     id: sanitizeText(row.id, 120),
     publisherName: sanitizeText(row.publisher_name, 80) || "Anonymous",
     setlistTitle: sanitizeText(row.setlist_title, 120) || "Untitled",
-    publishedAt:
-      row.published_at instanceof Date
-        ? row.published_at.toISOString()
-        : String(row.published_at || new Date().toISOString()),
+    publishedAt,
+    updatedAt: toIsoString(row.updated_at, publishedAt),
     notes: sanitizeText(row.notes, MAX_NOTES_LENGTH),
     exportSettings: {
       monoFont,
@@ -258,7 +107,7 @@ function mapDbRowToPublicTabEntry(row: PublicTabRow): PublicTabEntry {
 
 async function listTabsFromDb(pool: PgPoolLike): Promise<PublicTabEntry[]> {
   const result = await pool.query<PublicTabRow>(
-    `SELECT id, publisher_name, setlist_title, published_at, notes, export_settings, songs
+    `SELECT id, publisher_name, setlist_title, published_at, updated_at, notes, export_settings, songs
      FROM public_tabs
      ORDER BY published_at DESC
      LIMIT $1`,
@@ -292,6 +141,29 @@ async function insertTabIntoDb(
       JSON.stringify(entry.songs),
     ]
   )
+}
+
+async function updateTabInDb(
+  pool: PgPoolLike,
+  id: string,
+  changes: { publisherName?: string; setlistTitle?: string; songs?: PublicTabEntry["songs"] }
+): Promise<PublicTabEntry | null> {
+  const result = await pool.query<PublicTabRow>(
+    `UPDATE public_tabs SET
+       publisher_name = COALESCE($2, publisher_name),
+       setlist_title = COALESCE($3, setlist_title),
+       songs = COALESCE($4::jsonb, songs),
+       updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, publisher_name, setlist_title, published_at, updated_at, notes, export_settings, songs`,
+    [
+      id,
+      changes.publisherName ?? null,
+      changes.setlistTitle ?? null,
+      changes.songs ? JSON.stringify(changes.songs) : null,
+    ]
+  )
+  return result.rows[0] ? mapDbRowToPublicTabEntry(result.rows[0]) : null
 }
 
 async function deleteTabFromDb(pool: PgPoolLike, id: string): Promise<boolean> {
@@ -381,12 +253,7 @@ export default async function handler(
         : `Setlist (${songs.length} songs)`)
     const notes = sanitizeText(payload.notes, MAX_NOTES_LENGTH)
 
-    const rawMonoFont = payload.exportSettings?.monoFont
-    const monoFont: MonoFontOption =
-      typeof rawMonoFont === "string" &&
-      ALLOWED_MONO_FONTS.includes(rawMonoFont as MonoFontOption)
-        ? (rawMonoFont as MonoFontOption)
-        : "roboto-mono"
+    const monoFont = sanitizeMonoFont(payload.exportSettings?.monoFont)
 
     const noteBoxes = sanitizeNoteBoxes(payload.exportSettings?.noteBoxes)
 
@@ -395,6 +262,7 @@ export default async function handler(
       publisherName,
       setlistTitle,
       publishedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       notes,
       exportSettings: {
         monoFont,
@@ -412,10 +280,7 @@ export default async function handler(
       res.status(201).json({ tab: newEntry })
     } catch (error) {
       console.error("Failed to persist public tab:", error)
-      res.status(500).json({
-        error:
-          "Failed to persist public tab data. Verify NETLIFY_DATABASE_URL and pg installation.",
-      })
+      res.status(500).json({ error: describeDbError(error) })
     }
     return
   }
@@ -433,8 +298,8 @@ export default async function handler(
       return
     }
 
-    if (DELETE_PASSWORD && password !== DELETE_PASSWORD) {
-      res.status(401).json({ error: "Invalid delete password." })
+    if (!isEditPasswordValid(password)) {
+      res.status(401).json({ error: "Wrong edit/delete password." })
       return
     }
 
@@ -455,6 +320,54 @@ export default async function handler(
     return
   }
 
-  res.setHeader("Allow", "GET,POST,DELETE")
+  if (req.method === "PUT") {
+    const payload: UpdatePayload =
+      req.body && typeof req.body === "object" ? req.body : {}
+
+    const id = sanitizeText(payload.id, 120)
+    if (!id) {
+      res.status(400).json({ error: "Tab id is required." })
+      return
+    }
+
+    if (!isEditPasswordValid(payload.password)) {
+      res.status(401).json({ error: "Wrong edit/delete password." })
+      return
+    }
+
+    const songs = payload.songs === undefined ? undefined : sanitizeSongs(payload.songs)
+    if (songs && songs.length === 0) {
+      res.status(400).json({ error: "A tab needs at least one song with chords." })
+      return
+    }
+
+    try {
+      const pool = await getDbPool()
+      const updated = await updateTabInDb(pool, id, {
+        publisherName:
+          payload.publisherName === undefined
+            ? undefined
+            : sanitizeText(payload.publisherName, 80) || "Anonymous",
+        setlistTitle:
+          payload.setlistTitle === undefined
+            ? undefined
+            : sanitizeText(payload.setlistTitle, 120) || undefined,
+        songs,
+      })
+
+      if (!updated) {
+        res.status(404).json({ error: "Tab not found." })
+        return
+      }
+
+      res.status(200).json({ tab: updated })
+    } catch (error) {
+      console.error("Failed updating tab:", error)
+      res.status(500).json({ error: describeDbError(error) })
+    }
+    return
+  }
+
+  res.setHeader("Allow", "GET,POST,PUT,DELETE")
   res.status(405).json({ error: "Method not allowed" })
 }

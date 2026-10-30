@@ -79,10 +79,19 @@ import {
   X,
   SlidersHorizontal,
   StickyNote,
+  Library,
+  GripVertical,
+  ArrowUpDown,
+  KeyRound,
 } from "lucide-react"
 
 const MIN_NOTE_BOX_DIMENSION = 0.02
+// Setlists saved before they moved to the shared database (uploaded on request).
 const SAVED_SETLISTS_STORAGE_KEY = "tabs.savedSetlists.v1"
+const EDIT_PASSWORD_STORAGE_KEY = "tabs.editPassword.v1"
+const SETLIST_SORT_STORAGE_KEY = "tabs.sort.setlists.v1"
+const SONG_SORT_STORAGE_KEY = "tabs.sort.songs.v1"
+const ADD_MODE_STORAGE_KEY = "tabs.addSongsMode.v1"
 const WORKING_SETLIST_STORAGE_KEY = "tabs.workingSetlist.v1"
 
 // Browser-side fallbacks, used only if our own /api/fetch-tab route fails.
@@ -93,6 +102,19 @@ const CLIENT_PROXIES: Array<(url: string) => string> = [
 ]
 
 type WorkspaceView = "editor" | "saved" | "published"
+
+type SortMode = "added" | "modified" | "name"
+const SORT_MODES: SortMode[] = ["added", "modified", "name"]
+const SORT_LABELS: Record<SortMode, string> = {
+  added: "Date added",
+  modified: "Date modified",
+  name: "Name",
+}
+
+type AddSongsMode = "library" | "link" | "paste"
+const ADD_SONGS_MODES: AddSongsMode[] = ["library", "link", "paste"]
+
+type PasswordStatus = "none" | "checking" | "valid" | "invalid"
 
 interface SongData {
   id: string
@@ -148,6 +170,48 @@ function serializeWorkingSetlist(
     },
   }
   return JSON.stringify(working)
+}
+
+// Newest first for dates, A→Z for names.
+function sortItems<T>(
+  items: T[],
+  mode: SortMode,
+  keys: { added: (item: T) => string; modified: (item: T) => string; name: (item: T) => string }
+): T[] {
+  const sorted = [...items]
+  if (mode === "name") {
+    sorted.sort((a, b) =>
+      keys.name(a).localeCompare(keys.name(b), undefined, { sensitivity: "base", numeric: true })
+    )
+  } else {
+    const key = keys[mode]
+    sorted.sort((a, b) => Date.parse(key(b) || "") - Date.parse(key(a) || ""))
+  }
+  return sorted
+}
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+  }
+}
+
+async function apiRequest<T = unknown>(
+  url: string,
+  method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
+  body?: unknown
+): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    cache: "no-store",
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string }
+  if (!res.ok) {
+    throw new ApiError(data.error || `Request failed (${res.status})`, res.status)
+  }
+  return data
 }
 
 function createId(): string {
@@ -510,6 +574,104 @@ function SectionHeading({
   )
 }
 
+function describeLibraryTab(publicTab: PublicTabEntry): string {
+  const parts =
+    publicTab.songs.length === 1
+      ? [cleanTabText(publicTab.songs[0].artist)]
+      : [`${publicTab.songs.length} songs (mash-up)`]
+  if (publicTab.publisherName && publicTab.publisherName !== "Anonymous") {
+    parts.push(`by ${cleanTabText(publicTab.publisherName)}`)
+  }
+  parts.push(new Date(publicTab.publishedAt).toLocaleDateString())
+  return parts.join(" · ")
+}
+
+function SearchInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string
+  onChange: (value: string) => void
+  placeholder: string
+}) {
+  return (
+    <div className="relative min-w-0 flex-1">
+      <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+      <Input
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="pl-9"
+      />
+    </div>
+  )
+}
+
+function SortSelect({ value, onChange }: { value: SortMode; onChange: (value: SortMode) => void }) {
+  return (
+    <label className="relative flex flex-shrink-0 items-center">
+      <span className="sr-only">Sort by</span>
+      <ArrowUpDown className="pointer-events-none absolute left-3 h-4 w-4 text-slate-400" />
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value as SortMode)}
+        className="h-10 rounded-md border border-input bg-white pl-9 pr-3 text-sm text-slate-700"
+      >
+        {SORT_MODES.map(mode => (
+          <option key={mode} value={mode}>
+            {SORT_LABELS[mode]}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function PasswordField({
+  value,
+  onChange,
+  status,
+}: {
+  value: string
+  onChange: (value: string) => void
+  status: PasswordStatus
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+      <label htmlFor="edit-password" className="flex items-center gap-2 text-sm font-medium text-slate-700">
+        <KeyRound className="h-4 w-4 text-slate-500" />
+        Edit/delete password
+      </label>
+      <Input
+        id="edit-password"
+        type="password"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="Ask Allen"
+        autoComplete="current-password"
+        className="h-8 w-40 bg-white"
+      />
+      <span
+        className={cn(
+          "text-sm",
+          status === "valid" && "text-emerald-700",
+          status === "invalid" && "text-red-600",
+          (status === "none" || status === "checking") && "text-slate-500"
+        )}
+      >
+        {status === "valid"
+          ? "✓ You can edit and delete"
+          : status === "invalid"
+          ? "Wrong password"
+          : status === "checking"
+          ? "Checking…"
+          : "Needed to edit or delete"}
+      </span>
+    </div>
+  )
+}
+
 export default function ChordTransposer() {
   const [view, setView] = useState<WorkspaceView>("editor")
 
@@ -519,13 +681,26 @@ export default function ChordTransposer() {
   const [activeSavedSetlistId, setActiveSavedSetlistId] = useState<string | null>(null)
   const [savedSetlists, setSavedSetlists] = useState<SavedSetlist[]>([])
   const [savedSetlistSearch, setSavedSetlistSearch] = useState("")
+  const [isSetlistsLoading, setIsSetlistsLoading] = useState(false)
+  const [hasLoadedSetlists, setHasLoadedSetlists] = useState(false)
+  const [isSavingSetlist, setIsSavingSetlist] = useState(false)
+  const [deletingSetlistId, setDeletingSetlistId] = useState<string | null>(null)
+  const [localOnlySetlists, setLocalOnlySetlists] = useState<SavedSetlist[]>([])
+  const [isUploadingLocal, setIsUploadingLocal] = useState(false)
+  const [setlistSort, setSetlistSort] = useState<SortMode>("added")
+  const [songSort, setSongSort] = useState<SortMode>("added")
+  const [editPassword, setEditPassword] = useState("")
+  const [passwordStatus, setPasswordStatus] = useState<PasswordStatus>("none")
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null)
   const [hasHydrated, setHasHydrated] = useState(false)
 
   // Adding songs
   const [linkInput, setLinkInput] = useState("")
   const [loadingProgress, setLoadingProgress] = useState<{ done: number; total: number } | null>(null)
   const [pastedTabText, setPastedTabText] = useState("")
-  const [isPasteOpen, setIsPasteOpen] = useState(true)
+  const [addSongsMode, setAddSongsMode] = useState<AddSongsMode>("library")
+  const [librarySearch, setLibrarySearch] = useState("")
   const [editingSongId, setEditingSongId] = useState<string | null>(null)
 
   // PDF + export
@@ -550,10 +725,7 @@ export default function ChordTransposer() {
   // Public tabs
   const [publicTabs, setPublicTabs] = useState<PublicTabEntry[]>([])
   const [isPublicTabsLoading, setIsPublicTabsLoading] = useState(false)
-  const [isPublishing, setIsPublishing] = useState(false)
   const [isPublishingSong, setIsPublishingSong] = useState(false)
-  const [publisherName, setPublisherName] = useState("")
-  const [publishTitle, setPublishTitle] = useState("")
   const [isPublishSongDialogOpen, setIsPublishSongDialogOpen] = useState(false)
   const [songToPublish, setSongToPublish] = useState<SongData | null>(null)
   const [publishSongTitle, setPublishSongTitle] = useState("")
@@ -561,7 +733,12 @@ export default function ChordTransposer() {
   const [previewPublicTab, setPreviewPublicTab] = useState<PublicTabEntry | null>(null)
   const [publicTabsSearch, setPublicTabsSearch] = useState("")
   const [publicSongSearch, setPublicSongSearch] = useState("")
-  const [deletePassword, setDeletePassword] = useState("")
+  const [songEditTarget, setSongEditTarget] = useState<PublicTabEntry | null>(null)
+  const [songEditTitle, setSongEditTitle] = useState("")
+  const [songEditArtist, setSongEditArtist] = useState("")
+  const [songEditPublisher, setSongEditPublisher] = useState("")
+  const [songEditText, setSongEditText] = useState("")
+  const [isSavingSongEdit, setIsSavingSongEdit] = useState(false)
   const [deletingTabId, setDeletingTabId] = useState<string | null>(null)
 
   const isLoadingLinks = loadingProgress !== null
@@ -647,25 +824,32 @@ export default function ChordTransposer() {
   const lastWrittenWorkingRef = useRef<string | null>(null)
 
   useEffect(() => {
-    const storedSetlists = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
-    if (Array.isArray(storedSetlists)) setSavedSetlists(storedSetlists)
-
     applyWorkingSetlist(readStorage<WorkingSetlist>(WORKING_SETLIST_STORAGE_KEY))
+
+    const storedLocal = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
+    if (Array.isArray(storedLocal)) setLocalOnlySetlists(storedLocal)
+
+    const storedPassword = readStorage<string>(EDIT_PASSWORD_STORAGE_KEY)
+    if (typeof storedPassword === "string") setEditPassword(storedPassword)
+
+    const storedSetlistSort = readStorage<SortMode>(SETLIST_SORT_STORAGE_KEY)
+    if (storedSetlistSort && SORT_MODES.includes(storedSetlistSort)) setSetlistSort(storedSetlistSort)
+    const storedSongSort = readStorage<SortMode>(SONG_SORT_STORAGE_KEY)
+    if (storedSongSort && SORT_MODES.includes(storedSongSort)) setSongSort(storedSongSort)
+    const storedAddMode = readStorage<AddSongsMode>(ADD_MODE_STORAGE_KEY)
+    if (storedAddMode && ADD_SONGS_MODES.includes(storedAddMode)) setAddSongsMode(storedAddMode)
+
     setHasHydrated(true)
 
     // Keep several open tabs of the app in sync.
     const handleStorage = (event: StorageEvent) => {
-      if (event.key === SAVED_SETLISTS_STORAGE_KEY) {
-        const next = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
-        setSavedSetlists(Array.isArray(next) ? next : [])
-      } else if (event.key === WORKING_SETLIST_STORAGE_KEY && event.newValue) {
-        if (event.newValue === lastWrittenWorkingRef.current) return
-        try {
-          lastWrittenWorkingRef.current = event.newValue
-          applyWorkingSetlist(JSON.parse(event.newValue) as WorkingSetlist)
-        } catch {
-          // ignore malformed data
-        }
+      if (event.key !== WORKING_SETLIST_STORAGE_KEY || !event.newValue) return
+      if (event.newValue === lastWrittenWorkingRef.current) return
+      try {
+        lastWrittenWorkingRef.current = event.newValue
+        applyWorkingSetlist(JSON.parse(event.newValue) as WorkingSetlist)
+      } catch {
+        // ignore malformed data
       }
     }
 
@@ -690,10 +874,68 @@ export default function ChordTransposer() {
     }
   }, [hasHydrated, setlistName, activeSavedSetlistId, songs, currentSettings])
 
-  const persistSavedSetlists = useCallback((next: SavedSetlist[]) => {
-    setSavedSetlists(next)
-    writeStorage(SAVED_SETLISTS_STORAGE_KEY, next)
+  // Remember list preferences in this browser.
+  useEffect(() => {
+    if (hasHydrated) writeStorage(SETLIST_SORT_STORAGE_KEY, setlistSort)
+  }, [hasHydrated, setlistSort])
+  useEffect(() => {
+    if (hasHydrated) writeStorage(SONG_SORT_STORAGE_KEY, songSort)
+  }, [hasHydrated, songSort])
+  useEffect(() => {
+    if (hasHydrated) writeStorage(ADD_MODE_STORAGE_KEY, addSongsMode)
+  }, [hasHydrated, addSongsMode])
+
+  // ---------- Edit/delete password ----------
+
+  // Saved in this browser; the server checks it on every edit/delete.
+  useEffect(() => {
+    if (!hasHydrated) return
+    writeStorage(EDIT_PASSWORD_STORAGE_KEY, editPassword)
+
+    const password = editPassword.trim()
+    if (!password) {
+      setPasswordStatus("none")
+      return
+    }
+
+    setPasswordStatus("checking")
+    let cancelled = false
+    const timeout = setTimeout(async () => {
+      try {
+        const body = await apiRequest<{ ok: boolean }>("/api/check-password", "POST", { password })
+        if (!cancelled) setPasswordStatus(body.ok ? "valid" : "invalid")
+      } catch {
+        if (!cancelled) setPasswordStatus("invalid")
+      }
+    }, 400)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timeout)
+    }
+  }, [hasHydrated, editPassword])
+
+  const canEdit = passwordStatus === "valid"
+
+  // ---------- Shared setlists ----------
+
+  const loadSetlists = useCallback(async () => {
+    setIsSetlistsLoading(true)
+    try {
+      const body = await apiRequest<{ setlists: SavedSetlist[] }>("/api/setlists")
+      setSavedSetlists(Array.isArray(body.setlists) ? body.setlists : [])
+      setHasLoadedSetlists(true)
+    } catch (err) {
+      console.error("Failed to load setlists:", err)
+      setError(err instanceof Error ? err.message : "Failed to load setlists.")
+    } finally {
+      setIsSetlistsLoading(false)
+    }
   }, [])
+
+  useEffect(() => {
+    loadSetlists()
+  }, [loadSetlists])
 
   const activeSavedSetlist = useMemo(
     () => savedSetlists.find(setlist => setlist.id === activeSavedSetlistId) || null,
@@ -709,20 +951,17 @@ export default function ChordTransposer() {
   }, [activeSavedSetlist, setlistName, songs, currentSettings])
 
   const saveSetlist = useCallback(
-    (asNew = false) => {
+    async (asNew = false) => {
       if (songs.length === 0) {
         setError("Add at least one song before saving a setlist.")
         return
       }
 
-      const now = new Date().toISOString()
       const name = setlistName.trim() || `Setlist ${new Date().toLocaleDateString()}`
       const existing = asNew ? null : activeSavedSetlist
-      const entry: SavedSetlist = {
-        id: existing?.id || createId(),
+      const payload = {
+        id: existing?.id,
         name,
-        createdAt: existing?.createdAt || now,
-        updatedAt: now,
         songs: songs.map(({ uri, artist, song, chords, transposeStep }) => ({
           uri,
           artist,
@@ -733,16 +972,25 @@ export default function ChordTransposer() {
         settings: currentSettings,
       }
 
-      persistSavedSetlists(
-        existing
-          ? savedSetlists.map(setlist => (setlist.id === existing.id ? entry : setlist))
-          : [entry, ...savedSetlists]
-      )
-      setSetlistName(name)
-      setActiveSavedSetlistId(entry.id)
-      showNotice(existing ? `Updated "${name}"` : `Saved "${name}"`)
+      setIsSavingSetlist(true)
+      setError(null)
+      try {
+        const { setlist } = await apiRequest<{ setlist: SavedSetlist }>(
+          "/api/setlists",
+          existing ? "PUT" : "POST",
+          payload
+        )
+        setSavedSetlists(prev => [setlist, ...prev.filter(entry => entry.id !== setlist.id)])
+        setSetlistName(setlist.name)
+        setActiveSavedSetlistId(setlist.id)
+        showNotice(existing ? `Updated "${setlist.name}"` : `Saved "${setlist.name}"`)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to save setlist.")
+      } finally {
+        setIsSavingSetlist(false)
+      }
     },
-    [songs, setlistName, activeSavedSetlist, currentSettings, savedSetlists, persistSavedSetlists, showNotice]
+    [songs, setlistName, activeSavedSetlist, currentSettings, showNotice]
   )
 
   const confirmDiscardChanges = useCallback(() => {
@@ -780,14 +1028,57 @@ export default function ChordTransposer() {
   )
 
   const deleteSavedSetlist = useCallback(
-    (saved: SavedSetlist) => {
-      if (!window.confirm(`Delete saved setlist "${saved.name}"? This can't be undone.`)) return
-      persistSavedSetlists(savedSetlists.filter(setlist => setlist.id !== saved.id))
-      if (activeSavedSetlistId === saved.id) setActiveSavedSetlistId(null)
-      showNotice(`Deleted "${saved.name}"`)
+    async (saved: SavedSetlist) => {
+      if (!window.confirm(`Delete setlist "${saved.name}" for everyone? This can't be undone.`)) return
+
+      setDeletingSetlistId(saved.id)
+      setError(null)
+      try {
+        await apiRequest("/api/setlists", "DELETE", { id: saved.id, password: editPassword.trim() })
+        setSavedSetlists(prev => prev.filter(setlist => setlist.id !== saved.id))
+        if (activeSavedSetlistId === saved.id) setActiveSavedSetlistId(null)
+        showNotice(`Deleted "${saved.name}"`)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete setlist.")
+      } finally {
+        setDeletingSetlistId(null)
+      }
     },
-    [savedSetlists, activeSavedSetlistId, persistSavedSetlists, showNotice]
+    [activeSavedSetlistId, editPassword, showNotice]
   )
+
+  // Setlists saved before they were shared lived only in this browser.
+  const uploadLocalSetlists = useCallback(async () => {
+    setIsUploadingLocal(true)
+    setError(null)
+    const remaining: SavedSetlist[] = []
+    for (const local of localOnlySetlists) {
+      try {
+        await apiRequest("/api/setlists", "POST", local)
+      } catch (err) {
+        // 409 means it was already uploaded (e.g. from another tab).
+        if (!(err instanceof ApiError && err.status === 409)) remaining.push(local)
+      }
+    }
+
+    setLocalOnlySetlists(remaining)
+    if (remaining.length > 0) writeStorage(SAVED_SETLISTS_STORAGE_KEY, remaining)
+    else {
+      try {
+        window.localStorage.removeItem(SAVED_SETLISTS_STORAGE_KEY)
+      } catch {
+        // ignore
+      }
+    }
+
+    await loadSetlists()
+    setIsUploadingLocal(false)
+    if (remaining.length > 0) {
+      setError(`Couldn't upload ${pluralize(remaining.length, "setlist")}. Try again.`)
+    } else {
+      showNotice("Uploaded your setlists — everyone can see them now.")
+    }
+  }, [localOnlySetlists, loadSetlists, showNotice])
 
   const startNewSetlist = useCallback(() => {
     if (!confirmDiscardChanges()) return
@@ -802,14 +1093,19 @@ export default function ChordTransposer() {
 
   const filteredSavedSetlists = useMemo(() => {
     const query = savedSetlistSearch.trim().toLowerCase()
-    const sorted = [...savedSetlists].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    if (!query) return sorted
-    return sorted.filter(setlist =>
-      `${setlist.name} ${setlist.songs.map(song => `${song.song} ${song.artist}`).join(" ")}`
-        .toLowerCase()
-        .includes(query)
-    )
-  }, [savedSetlists, savedSetlistSearch])
+    const matching = query
+      ? savedSetlists.filter(setlist =>
+          `${setlist.name} ${setlist.songs.map(song => `${song.song} ${song.artist}`).join(" ")}`
+            .toLowerCase()
+            .includes(query)
+        )
+      : savedSetlists
+    return sortItems(matching, setlistSort, {
+      added: setlist => setlist.createdAt,
+      modified: setlist => setlist.updatedAt,
+      name: setlist => setlist.name,
+    })
+  }, [savedSetlists, savedSetlistSearch, setlistSort])
 
   // ---------- Adding songs ----------
 
@@ -859,11 +1155,10 @@ export default function ChordTransposer() {
     setLinkInput(failed.join("\n"))
 
     if (failed.length > 0) {
-      setIsPasteOpen(true)
       setError(
         `Couldn't load ${pluralize(failed.length, "link")}. ${
           added > 0 ? `Added ${pluralize(added, "song")}. ` : ""
-        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box, or paste the tab text below.`
+        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box, or use "Paste text" instead.`
       )
     } else {
       showNotice(`Added ${pluralize(added, "song")}`)
@@ -995,18 +1290,38 @@ export default function ChordTransposer() {
 
   // ---------- Public tabs ----------
 
-  const filteredPublicTabs = useMemo(() => {
-    const query = publicTabsSearch.trim().toLowerCase()
-    if (!query) return publicTabs
+  const sortedPublicTabs = useMemo(
+    () =>
+      sortItems(publicTabs, songSort, {
+        added: tab => tab.publishedAt,
+        modified: tab => tab.updatedAt || tab.publishedAt,
+        name: tab => cleanTabText(tab.setlistTitle),
+      }),
+    [publicTabs, songSort]
+  )
 
-    return publicTabs.filter(tab => {
-      const songMetadata = tab.songs
-        .map(song => `${song.song} ${song.artist}`)
-        .join(" ")
-      const searchableText = `${tab.setlistTitle} ${tab.publisherName} ${songMetadata}`.toLowerCase()
-      return searchableText.includes(query)
-    })
-  }, [publicTabs, publicTabsSearch])
+  const searchPublicTabs = useCallback(
+    (queryText: string) => {
+      const query = queryText.trim().toLowerCase()
+      if (!query) return sortedPublicTabs
+      return sortedPublicTabs.filter(tab => {
+        const songMetadata = tab.songs.map(song => `${song.song} ${song.artist}`).join(" ")
+        return `${tab.setlistTitle} ${tab.publisherName} ${songMetadata}`
+          .toLowerCase()
+          .includes(query)
+      })
+    },
+    [sortedPublicTabs]
+  )
+
+  const filteredPublicTabs = useMemo(
+    () => searchPublicTabs(publicTabsSearch),
+    [searchPublicTabs, publicTabsSearch]
+  )
+  const filteredLibraryTabs = useMemo(
+    () => searchPublicTabs(librarySearch),
+    [searchPublicTabs, librarySearch]
+  )
 
   const filteredPreviewSongs = useMemo(() => {
     const songsForPreview = previewPublicTab?.songs || []
@@ -1025,84 +1340,18 @@ export default function ChordTransposer() {
       const res = await fetch("/api/public-tabs")
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string }
-        throw new Error(body.error || "Failed to load public tabs. Try refreshing.")
+        throw new Error(body.error || "Failed to load songs. Try refreshing.")
       }
 
       const data = (await res.json()) as PublicTabsResponse
       setPublicTabs(Array.isArray(data.tabs) ? data.tabs : [])
     } catch (err) {
-      console.error("Failed to fetch public tabs:", err)
-      setError(err instanceof Error ? err.message : "Failed to load public tabs. Try refreshing.")
+      console.error("Failed to fetch songs:", err)
+      setError(err instanceof Error ? err.message : "Failed to load songs. Try refreshing.")
     } finally {
       setIsPublicTabsLoading(false)
     }
   }, [])
-
-  const defaultPublishTitle =
-    setlistName.trim() ||
-    (songs.length === 1
-      ? `${songs[0].artist} - ${songs[0].song}`
-      : `Setlist (${pluralize(songs.length, "song")})`)
-
-  const publishCurrentSetlist = useCallback(async () => {
-    if (songs.length === 0) {
-      setError("Add at least one song before publishing.")
-      return
-    }
-
-    setIsPublishing(true)
-    setError(null)
-
-    try {
-      const res = await fetch("/api/public-tabs", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          publisherName,
-          setlistTitle: publishTitle.trim() || defaultPublishTitle,
-          notes: "",
-          exportSettings: {
-            monoFont,
-            noteBoxes,
-          },
-          songs: songs.map(song => ({
-            artist: song.artist,
-            song: song.song,
-            transposedChords: song.transposedChords,
-            transposeStep: song.transposeStep,
-          })),
-        }),
-      })
-
-      if (!res.ok) {
-        const responseBody = (await res.json()) as { error?: string }
-        throw new Error(responseBody.error || "Failed to publish setlist")
-      }
-
-      showNotice("Published to Public Tabs.")
-      await loadPublicTabs()
-    } catch (err) {
-      console.error("Failed to publish setlist:", err)
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Failed to publish setlist. Please try again."
-      )
-    } finally {
-      setIsPublishing(false)
-    }
-  }, [
-    songs,
-    publisherName,
-    publishTitle,
-    defaultPublishTitle,
-    monoFont,
-    noteBoxes,
-    loadPublicTabs,
-    showNotice,
-  ])
 
   const openPublishSongDialog = useCallback((song: SongData) => {
     setSongToPublish(song)
@@ -1182,7 +1431,11 @@ export default function ChordTransposer() {
       }))
 
       setSongs(prev => [...prev, ...importedSongs])
-      showNotice(`Added ${pluralize(importedSongs.length, "song")} to your setlist`)
+      showNotice(
+        importedSongs.length === 1
+          ? `Added "${importedSongs[0].song}" to your setlist`
+          : `Added ${pluralize(importedSongs.length, "song")} to your setlist`
+      )
     },
     [showNotice]
   )
@@ -1194,12 +1447,7 @@ export default function ChordTransposer() {
 
   const deletePublicTab = useCallback(
     async (publicTab: PublicTabEntry) => {
-      if (!deletePassword.trim()) {
-        setError("Enter the delete password before deleting tabs.")
-        return
-      }
-
-      if (!window.confirm(`Delete "${publicTab.setlistTitle}" from public tabs?`)) {
+      if (!window.confirm(`Delete "${cleanTabText(publicTab.setlistTitle)}" from the song library for everyone?`)) {
         return
       }
 
@@ -1207,38 +1455,84 @@ export default function ChordTransposer() {
       setError(null)
 
       try {
-        const response = await fetch("/api/public-tabs", {
-          method: "DELETE",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            id: publicTab.id,
-            password: deletePassword.trim(),
-          }),
+        await apiRequest("/api/public-tabs", "DELETE", {
+          id: publicTab.id,
+          password: editPassword.trim(),
         })
-
-        if (!response.ok) {
-          const body = (await response.json()) as { error?: string }
-          throw new Error(body.error || "Failed to delete published tab")
-        }
-
         setPublicTabs(prev => prev.filter(tab => tab.id !== publicTab.id))
         if (previewPublicTab?.id === publicTab.id) {
           setPreviewPublicTab(null)
         }
-        showNotice(`Deleted "${publicTab.setlistTitle}"`)
+        showNotice(`Deleted "${cleanTabText(publicTab.setlistTitle)}"`)
       } catch (err) {
         console.error("Failed deleting public tab:", err)
-        setError(
-          err instanceof Error ? err.message : "Failed to delete published tab."
-        )
+        setError(err instanceof Error ? err.message : "Failed to delete song.")
       } finally {
         setDeletingTabId(null)
       }
     },
-    [deletePassword, previewPublicTab, showNotice]
+    [editPassword, previewPublicTab, showNotice]
   )
+
+  const openSongEditor = useCallback((publicTab: PublicTabEntry) => {
+    const isSingleSong = publicTab.songs.length === 1
+    setSongEditTarget(publicTab)
+    setSongEditTitle(cleanTabText(publicTab.setlistTitle))
+    setSongEditPublisher(cleanTabText(publicTab.publisherName))
+    setSongEditArtist(isSingleSong ? cleanTabText(publicTab.songs[0].artist) : "")
+    setSongEditText(isSingleSong ? stripChordMarkup(cleanTabText(publicTab.songs[0].transposedChords)).trim() : "")
+  }, [])
+
+  const saveSongEdit = useCallback(async () => {
+    if (!songEditTarget) return
+    const title = songEditTitle.trim()
+    if (!title) {
+      setError("A title is required.")
+      return
+    }
+
+    const isSingleSong = songEditTarget.songs.length === 1
+    let songs: PublicTabEntry["songs"] | undefined
+    if (isSingleSong) {
+      try {
+        const artist = songEditArtist.trim() || "Unknown Artist"
+        const parsed = parsePastedSong(`Title: ${title}\nArtist: ${artist}\n\n${songEditText}`)
+        songs = [{ artist, song: title, transposedChords: parsed.chords, transposeStep: 0 }]
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Couldn't read the chord sheet.")
+        return
+      }
+    }
+
+    setIsSavingSongEdit(true)
+    setError(null)
+    try {
+      const { tab } = await apiRequest<{ tab: PublicTabEntry }>("/api/public-tabs", "PUT", {
+        id: songEditTarget.id,
+        password: editPassword.trim(),
+        setlistTitle: title,
+        publisherName: songEditPublisher.trim(),
+        songs,
+      })
+      setPublicTabs(prev => prev.map(entry => (entry.id === tab.id ? tab : entry)))
+      if (previewPublicTab?.id === tab.id) setPreviewPublicTab(tab)
+      setSongEditTarget(null)
+      showNotice(`Saved changes to "${cleanTabText(tab.setlistTitle)}"`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save changes.")
+    } finally {
+      setIsSavingSongEdit(false)
+    }
+  }, [
+    songEditTarget,
+    songEditTitle,
+    songEditArtist,
+    songEditPublisher,
+    songEditText,
+    editPassword,
+    previewPublicTab,
+    showNotice,
+  ])
 
   useEffect(() => {
     loadPublicTabs()
@@ -1270,7 +1564,7 @@ export default function ChordTransposer() {
   const startEditingSong = useCallback((song: SongData) => {
     setEditingSongId(song.id)
     setPastedTabText(songToEditableTabText(song))
-    setIsPasteOpen(true)
+    setAddSongsMode("paste")
     setError(null)
     setView("editor")
     window.scrollTo({ top: 0, behavior: "smooth" })
@@ -1298,6 +1592,16 @@ export default function ChordTransposer() {
       if (target < 0 || target >= prev.length) return prev
       const next = [...prev]
       ;[next[index], next[target]] = [next[target], next[index]]
+      return next
+    })
+  }, [])
+
+  const moveSongTo = useCallback((from: number, to: number) => {
+    setSongs(prev => {
+      if (from === to || from < 0 || to < 0 || from >= prev.length || to >= prev.length) return prev
+      const next = [...prev]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
       return next
     })
   }, [])
@@ -1503,11 +1807,13 @@ export default function ChordTransposer() {
 
   const navItems: Array<{ value: WorkspaceView; label: string; count?: number }> = [
     { value: "editor", label: "Editor", count: songs.length || undefined },
-    { value: "saved", label: "My Setlists", count: savedSetlists.length || undefined },
-    { value: "published", label: "Public Tabs" },
+    { value: "saved", label: "Setlists", count: savedSetlists.length || undefined },
+    { value: "published", label: "Songs", count: publicTabs.length || undefined },
   ]
 
-  const setlistStatus = activeSavedSetlist
+  const setlistStatus = isSavingSetlist
+    ? "Saving…"
+    : activeSavedSetlist
     ? hasUnsavedChanges
       ? "Unsaved changes"
       : `Saved ${formatRelativeTime(activeSavedSetlist.updatedAt)}`
@@ -1611,13 +1917,93 @@ export default function ChordTransposer() {
                   <SectionHeading
                     icon={<Plus className="h-5 w-5" />}
                     title="Add songs"
-                    description="Paste one or more Ultimate Guitar links (one per line), or paste tab text."
                   />
                   <CardContent className="space-y-4">
+                    <div className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1" role="tablist">
+                      {(
+                        [
+                          { mode: "library", label: "Library", icon: <Library className="h-4 w-4" /> },
+                          { mode: "link", label: "Link", icon: <LinkIcon className="h-4 w-4" /> },
+                          { mode: "paste", label: editingSongId ? "Editing" : "Paste text", icon: <ClipboardPaste className="h-4 w-4" /> },
+                        ] as Array<{ mode: AddSongsMode; label: string; icon: ReactNode }>
+                      ).map(tab => (
+                        <button
+                          key={tab.mode}
+                          type="button"
+                          role="tab"
+                          aria-selected={addSongsMode === tab.mode}
+                          onClick={() => setAddSongsMode(tab.mode)}
+                          className={cn(
+                            "flex items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium transition-colors",
+                            addSongsMode === tab.mode
+                              ? "bg-white text-slate-900 shadow-sm"
+                              : "text-slate-600 hover:text-slate-900"
+                          )}
+                        >
+                          {tab.icon}
+                          {tab.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {addSongsMode === "library" && (
+                      <div className="space-y-3">
+                        <div className="flex gap-2">
+                          <SearchInput
+                            value={librarySearch}
+                            onChange={setLibrarySearch}
+                            placeholder="Search songs"
+                          />
+                          <SortSelect value={songSort} onChange={setSongSort} />
+                        </div>
+                        <div className="max-h-[360px] divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                          {isPublicTabsLoading && publicTabs.length === 0 ? (
+                            <div className="flex items-center justify-center gap-2 py-8 text-sm text-slate-500">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Loading songs…
+                            </div>
+                          ) : filteredLibraryTabs.length === 0 ? (
+                            <p className="px-4 py-8 text-center text-sm text-slate-500">
+                              {publicTabs.length === 0
+                                ? "No songs in the library yet. Add one by link or pasted text, then press Publish on it."
+                                : "No matching songs."}
+                            </p>
+                          ) : (
+                            filteredLibraryTabs.map(publicTab => (
+                              <div key={publicTab.id} className="flex items-center gap-2 px-3 py-2 hover:bg-slate-50">
+                                <button
+                                  type="button"
+                                  onClick={() => openPublicTabPreview(publicTab)}
+                                  className="min-w-0 flex-1 text-left"
+                                  title="Preview"
+                                >
+                                  <div className="truncate text-sm font-semibold text-slate-900">
+                                    {cleanTabText(publicTab.setlistTitle)}
+                                  </div>
+                                  <div className="truncate text-xs text-slate-500">
+                                    {describeLibraryTab(publicTab)}
+                                  </div>
+                                </button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => addPublicTabToSetlist(publicTab)}
+                                  className="h-8 flex-shrink-0 px-2.5"
+                                >
+                                  <Plus className="mr-1 h-4 w-4" />
+                                  Add
+                                </Button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {addSongsMode === "link" && (
                     <div className="space-y-2">
-                      <Label htmlFor="song-links" className="flex items-center gap-2 text-sm font-medium">
-                        <LinkIcon className="h-4 w-4 text-slate-500" />
-                        Ultimate Guitar links
+                      <Label htmlFor="song-links" className="text-sm text-slate-600">
+                        Paste one or more Ultimate Guitar links, one per line.
                       </Label>
                       <textarea
                         id="song-links"
@@ -1664,88 +2050,68 @@ export default function ChordTransposer() {
                         </Button>
                       </div>
                     </div>
+                    )}
 
-                    <Separator />
-
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => setIsPasteOpen(prev => !prev)}
-                        className="flex w-full items-center justify-between rounded-md py-1 text-left text-sm font-medium text-slate-700 hover:text-slate-900"
-                        aria-expanded={isPasteOpen || Boolean(editingSongId)}
-                      >
-                        <span className="flex items-center gap-2">
-                          <ClipboardPaste className="h-4 w-4 text-slate-500" />
-                          {editingSongId ? "Editing song text" : "Paste tab text instead"}
-                        </span>
-                        {isPasteOpen || editingSongId ? (
-                          <ChevronUp className="h-4 w-4" />
-                        ) : (
-                          <ChevronDown className="h-4 w-4" />
-                        )}
-                      </button>
-
-                      {(isPasteOpen || editingSongId) && (
-                        <div className="mt-3 space-y-3">
-                          <p className="text-sm text-slate-500">
-                            Start with optional <code className="rounded bg-slate-100 px-1">Title:</code>,{" "}
-                            <code className="rounded bg-slate-100 px-1">Artist:</code>,{" "}
-                            <code className="rounded bg-slate-100 px-1">Key:</code>,{" "}
-                            <code className="rounded bg-slate-100 px-1">Capo:</code> lines, then chords and lyrics.
-                          </p>
-                          <textarea
-                            id="pasted-tab-text"
-                            value={pastedTabText}
-                            onChange={e => setPastedTabText(e.target.value)}
-                            onKeyDown={e => {
-                              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                                e.preventDefault()
-                                addOrConfirmPastedSong()
-                              }
-                            }}
-                            placeholder={
-                              "Title: Song Name\nArtist: Artist Name\nKey: G\nCapo: 4\n\n[Verse 1]\nD      G\nLyrics..."
-                            }
-                            className="min-h-[280px] w-full rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                            style={{ fontFamily: getBrowserFontStack(monoFont) }}
-                          />
-                          {pastedTabError && (
-                            <p className="text-sm text-red-600">{pastedTabError}</p>
-                          )}
-                          <div className="flex flex-wrap items-center justify-between gap-3">
-                            <span className="text-sm text-slate-500">
-                              {editingSongId
-                                ? "Preview updates as you type."
-                                : "The draft shows in the preview until you add it."}
-                            </span>
-                            <div className="flex items-center gap-2">
-                              {editingSongId && (
-                                <Button onClick={cancelEditingSong} variant="outline">
-                                  Cancel
-                                </Button>
-                              )}
-                              <Button
-                                onClick={addOrConfirmPastedSong}
-                                disabled={!pastedTabText.trim() || Boolean(pastedTabError)}
-                                variant={editingSongId ? "default" : "secondary"}
-                              >
-                                {editingSongId ? (
-                                  <>
-                                    <Check className="mr-2 h-4 w-4" />
-                                    Done editing
-                                  </>
-                                ) : (
-                                  <>
-                                    <Plus className="mr-2 h-4 w-4" />
-                                    Add song
-                                  </>
-                                )}
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
+                    {addSongsMode === "paste" && (
+                    <div className="space-y-3">
+                      <p className="text-sm text-slate-500">
+                        Start with optional <code className="rounded bg-slate-100 px-1">Title:</code>,{" "}
+                        <code className="rounded bg-slate-100 px-1">Artist:</code>,{" "}
+                        <code className="rounded bg-slate-100 px-1">Key:</code>,{" "}
+                        <code className="rounded bg-slate-100 px-1">Capo:</code> lines, then chords and lyrics.
+                      </p>
+                      <textarea
+                        id="pasted-tab-text"
+                        value={pastedTabText}
+                        onChange={e => setPastedTabText(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                            e.preventDefault()
+                            addOrConfirmPastedSong()
+                          }
+                        }}
+                        placeholder={
+                          "Title: Song Name\nArtist: Artist Name\nKey: G\nCapo: 4\n\n[Verse 1]\nD      G\nLyrics..."
+                        }
+                        className="min-h-[280px] w-full rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        style={{ fontFamily: getBrowserFontStack(monoFont) }}
+                      />
+                      {pastedTabError && (
+                        <p className="text-sm text-red-600">{pastedTabError}</p>
                       )}
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <span className="text-sm text-slate-500">
+                          {editingSongId
+                            ? "Preview updates as you type."
+                            : "The draft shows in the preview until you add it."}
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {editingSongId && (
+                            <Button onClick={cancelEditingSong} variant="outline">
+                              Cancel
+                            </Button>
+                          )}
+                          <Button
+                            onClick={addOrConfirmPastedSong}
+                            disabled={!pastedTabText.trim() || Boolean(pastedTabError)}
+                            variant={editingSongId ? "default" : "secondary"}
+                          >
+                            {editingSongId ? (
+                              <>
+                                <Check className="mr-2 h-4 w-4" />
+                                Done editing
+                              </>
+                            ) : (
+                              <>
+                                <Plus className="mr-2 h-4 w-4" />
+                                Add song
+                              </>
+                            )}
+                          </Button>
+                        </div>
+                      </div>
                     </div>
+                    )}
                   </CardContent>
                 </Card>
 
@@ -1762,8 +2128,16 @@ export default function ChordTransposer() {
                       />
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <Button size="sm" onClick={() => saveSetlist()} disabled={songs.length === 0}>
-                        <Save className="mr-2 h-4 w-4" />
+                      <Button
+                        size="sm"
+                        onClick={() => saveSetlist()}
+                        disabled={songs.length === 0 || isSavingSetlist}
+                      >
+                        {isSavingSetlist ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Save className="mr-2 h-4 w-4" />
+                        )}
                         {activeSavedSetlist ? "Save" : "Save setlist"}
                       </Button>
                       {activeSavedSetlist && (
@@ -1771,7 +2145,7 @@ export default function ChordTransposer() {
                           size="sm"
                           variant="outline"
                           onClick={() => saveSetlist(true)}
-                          disabled={songs.length === 0}
+                          disabled={songs.length === 0 || isSavingSetlist}
                         >
                           Save as new
                         </Button>
@@ -1803,30 +2177,69 @@ export default function ChordTransposer() {
                         <Music2 className="mx-auto h-10 w-10 text-slate-300" />
                         <p className="mt-3 font-medium text-slate-700">No songs yet</p>
                         <p className="mt-1 text-sm text-slate-500">
-                          Add songs above, or open one of{" "}
+                          Add songs above, or open one of the{" "}
                           <button
                             type="button"
                             onClick={() => setView("saved")}
                             className="font-medium text-primary hover:underline"
                           >
-                            your saved setlists
+                            saved setlists
                           </button>
                           .
                         </p>
                       </div>
                     ) : (
                       <ol className="space-y-2">
+                        {songs.length > 1 && (
+                          <p className="text-sm text-slate-500">Drag songs to reorder them.</p>
+                        )}
                         {songs.map((songData, index) => (
                           <li
                             key={songData.id}
+                            draggable
+                            onDragStart={e => {
+                              setDragIndex(index)
+                              e.dataTransfer.effectAllowed = "move"
+                              e.dataTransfer.setData("text/plain", String(index))
+                            }}
+                            onDragOver={e => {
+                              if (dragIndex === null) return
+                              e.preventDefault()
+                              e.dataTransfer.dropEffect = "move"
+                              if (dragOverIndex !== index) setDragOverIndex(index)
+                            }}
+                            onDrop={e => {
+                              e.preventDefault()
+                              if (dragIndex !== null) moveSongTo(dragIndex, index)
+                              setDragIndex(null)
+                              setDragOverIndex(null)
+                            }}
+                            onDragEnd={() => {
+                              setDragIndex(null)
+                              setDragOverIndex(null)
+                            }}
                             className={cn(
                               "rounded-lg border bg-white p-3 transition-colors",
                               editingSongId === songData.id
                                 ? "border-primary ring-1 ring-primary"
-                                : "border-slate-200 hover:border-slate-300"
+                                : "border-slate-200 hover:border-slate-300",
+                              dragIndex === index && "opacity-40",
+                              dragOverIndex === index &&
+                                dragIndex !== null &&
+                                dragIndex !== index &&
+                                (dragIndex < index
+                                  ? "shadow-[0_3px_0_0_hsl(var(--primary))]"
+                                  : "shadow-[0_-3px_0_0_hsl(var(--primary))]")
                             )}
                           >
-                            <div className="flex items-start gap-3">
+                            <div className="flex items-start gap-2">
+                              <span
+                                className="mt-1 hidden flex-shrink-0 cursor-grab text-slate-400 active:cursor-grabbing sm:block"
+                                title="Drag to reorder"
+                                aria-hidden
+                              >
+                                <GripVertical className="h-5 w-5" />
+                              </span>
                               <span className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold tabular-nums text-slate-600">
                                 {index + 1}
                               </span>
@@ -1862,7 +2275,7 @@ export default function ChordTransposer() {
                               </div>
                             </div>
 
-                            <div className="mt-3 flex flex-wrap items-center gap-2 pl-10">
+                            <div className="mt-3 flex flex-wrap items-center gap-2 pl-9 sm:pl-16">
                               <div className="flex items-center rounded-md border border-slate-200">
                                 <button
                                   type="button"
@@ -2278,36 +2691,72 @@ export default function ChordTransposer() {
             <Card className="shadow-sm">
               <SectionHeading
                 icon={<FolderOpen className="h-5 w-5" />}
-                title="My setlists"
-                description="Saved in this browser. Open one to edit it, or add its songs to your current setlist."
+                title="Setlists"
+                description="Shared with everyone. Open one to edit it, or add its songs to your current setlist."
                 action={
-                  <Button
-                    size="sm"
-                    onClick={() => saveSetlist()}
-                    disabled={songs.length === 0}
-                    title={songs.length === 0 ? "Add songs in the editor first" : undefined}
-                  >
-                    <Save className="mr-2 h-4 w-4" />
-                    Save current
-                  </Button>
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={loadSetlists}
+                      disabled={isSetlistsLoading}
+                      title="Refresh setlists"
+                    >
+                      <RefreshCw className={cn("h-4 w-4", isSetlistsLoading && "animate-spin")} />
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => saveSetlist()}
+                      disabled={songs.length === 0 || isSavingSetlist}
+                      title={songs.length === 0 ? "Add songs in the editor first" : undefined}
+                    >
+                      <Save className="mr-2 h-4 w-4" />
+                      Save current
+                    </Button>
+                  </div>
                 }
               />
               <CardContent className="space-y-4">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                  <Input
+                {localOnlySetlists.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    <span className="flex-1">
+                      {pluralize(localOnlySetlists.length, "setlist")} saved earlier only in this browser (
+                      {localOnlySetlists.map(setlist => setlist.name).join(", ")}). Upload{" "}
+                      {localOnlySetlists.length === 1 ? "it" : "them"} so everyone can see{" "}
+                      {localOnlySetlists.length === 1 ? "it" : "them"}.
+                    </span>
+                    <Button size="sm" onClick={uploadLocalSetlists} disabled={isUploadingLocal}>
+                      {isUploadingLocal ? (
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Upload className="mr-2 h-4 w-4" />
+                      )}
+                      Upload
+                    </Button>
+                  </div>
+                )}
+
+                <PasswordField value={editPassword} onChange={setEditPassword} status={passwordStatus} />
+
+                <div className="flex gap-2">
+                  <SearchInput
                     value={savedSetlistSearch}
-                    onChange={e => setSavedSetlistSearch(e.target.value)}
+                    onChange={setSavedSetlistSearch}
                     placeholder="Search setlists or songs"
-                    className="pl-9"
                   />
+                  <SortSelect value={setlistSort} onChange={setSetlistSort} />
                 </div>
 
-                <div className="max-h-[calc(100vh-17rem)] space-y-2 overflow-y-auto pr-1">
-                  {savedSetlists.length === 0 ? (
+                <div className="max-h-[calc(100vh-20rem)] min-h-[240px] space-y-2 overflow-y-auto pr-1">
+                  {!hasLoadedSetlists && isSetlistsLoading ? (
+                    <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-500">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Loading setlists…
+                    </div>
+                  ) : savedSetlists.length === 0 ? (
                     <div className="rounded-lg border-2 border-dashed border-slate-200 px-6 py-12 text-center">
                       <FolderOpen className="mx-auto h-10 w-10 text-slate-300" />
-                      <p className="mt-3 font-medium text-slate-700">No saved setlists yet</p>
+                      <p className="mt-3 font-medium text-slate-700">No setlists yet</p>
                       <p className="mt-1 text-sm text-slate-500">
                         Build a setlist in the editor and press <strong>Save setlist</strong>.
                       </p>
@@ -2341,7 +2790,10 @@ export default function ChordTransposer() {
                             )}
                           </div>
                           <div className="mt-0.5 text-sm text-slate-500">
-                            {pluralize(saved.songs.length, "song")} · updated {formatRelativeTime(saved.updatedAt)}
+                            {pluralize(saved.songs.length, "song")} · added{" "}
+                            {new Date(saved.createdAt).toLocaleDateString()}
+                            {saved.updatedAt !== saved.createdAt &&
+                              ` · updated ${formatRelativeTime(saved.updatedAt)}`}
                           </div>
                           <div className="mt-1 truncate text-sm text-slate-600">
                             {saved.songs.map(song => song.song).join(" · ")}
@@ -2361,15 +2813,22 @@ export default function ChordTransposer() {
                             <ListPlus className="mr-1.5 h-4 w-4" />
                             Add songs
                           </Button>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            onClick={() => deleteSavedSetlist(saved)}
-                            className="h-9 w-9 text-red-500 hover:bg-red-50 hover:text-red-700"
-                            title="Delete saved setlist"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                          {canEdit && (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={() => deleteSavedSetlist(saved)}
+                              disabled={deletingSetlistId === saved.id}
+                              className="h-9 w-9 text-red-500 hover:bg-red-50 hover:text-red-700"
+                              title="Delete setlist"
+                            >
+                              {deletingSetlistId === saved.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4" />
+                              )}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     ))
@@ -2380,169 +2839,106 @@ export default function ChordTransposer() {
           )}
 
           {view === "published" && (
-            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-              <div className="space-y-6 lg:col-span-4">
-                <Card className="shadow-sm">
-                  <SectionHeading
-                    icon={<Upload className="h-5 w-5" />}
-                    title="Publish your setlist"
-                    description="Share your current setlist so anyone can view or add it."
+            <Card className="shadow-sm">
+              <SectionHeading
+                icon={<Globe className="h-5 w-5" />}
+                title="Songs"
+                description={
+                  publicTabs.length > 0
+                    ? `${pluralize(publicTabs.length, "song")} in the shared library. Publish a song from your setlist to add it here.`
+                    : "The shared song library. Publish a song from your setlist to add it here."
+                }
+                action={
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={loadPublicTabs}
+                    disabled={isPublicTabsLoading}
+                    title="Refresh songs"
+                  >
+                    <RefreshCw className={cn("h-4 w-4", isPublicTabsLoading && "animate-spin")} />
+                  </Button>
+                }
+              />
+              <CardContent className="space-y-4">
+                <PasswordField value={editPassword} onChange={setEditPassword} status={passwordStatus} />
+
+                <div className="flex gap-2">
+                  <SearchInput
+                    value={publicTabsSearch}
+                    onChange={setPublicTabsSearch}
+                    placeholder="Search by song, artist, or publisher"
                   />
-                  <CardContent className="space-y-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="publish-title" className="text-sm font-medium">
-                        Title
-                      </Label>
-                      <Input
-                        id="publish-title"
-                        value={publishTitle}
-                        onChange={e => setPublishTitle(e.target.value)}
-                        placeholder={defaultPublishTitle}
-                      />
+                  <SortSelect value={songSort} onChange={setSongSort} />
+                </div>
+
+                <div className="max-h-[calc(100vh-20rem)] min-h-[420px] divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                  {isPublicTabsLoading && publicTabs.length === 0 ? (
+                    <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-500">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Loading songs…
                     </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="publisher-name" className="text-sm font-medium">
-                        Your name <span className="font-normal text-slate-500">(optional)</span>
-                      </Label>
-                      <Input
-                        id="publisher-name"
-                        value={publisherName}
-                        onChange={e => setPublisherName(e.target.value)}
-                        placeholder="Anonymous"
-                      />
-                    </div>
-                    <Button
-                      onClick={publishCurrentSetlist}
-                      disabled={songs.length === 0 || isPublishing}
-                      className="w-full"
-                    >
-                      {isPublishing ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Publishing
-                        </>
-                      ) : (
-                        <>
-                          <Upload className="mr-2 h-4 w-4" />
-                          {songs.length === 0
-                            ? "Add songs to publish"
-                            : `Publish ${pluralize(songs.length, "song")}`}
-                        </>
-                      )}
-                    </Button>
-                  </CardContent>
-                </Card>
-
-                <Card className="shadow-sm">
-                  <CardContent className="space-y-1.5 pt-6">
-                    <Label htmlFor="delete-password" className="text-sm font-medium">
-                      Delete password
-                    </Label>
-                    <Input
-                      id="delete-password"
-                      type="password"
-                      value={deletePassword}
-                      onChange={e => setDeletePassword(e.target.value)}
-                      placeholder="Ask Allen"
-                    />
-                    <p className="text-sm text-slate-500">Needed only to remove published tabs.</p>
-                  </CardContent>
-                </Card>
-              </div>
-
-              <Card className="shadow-sm lg:col-span-8">
-                <SectionHeading
-                  icon={<Globe className="h-5 w-5" />}
-                  title="Public tabs"
-                  description={
-                    publicTabs.length > 0
-                      ? `${pluralize(publicTabs.length, "published tab")}`
-                      : "Anyone can publish here."
-                  }
-                  action={
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={loadPublicTabs}
-                      disabled={isPublicTabsLoading}
-                      title="Refresh public tabs"
-                    >
-                      <RefreshCw
-                        className={cn("mr-1.5 h-4 w-4", isPublicTabsLoading && "animate-spin")}
-                      />
-                      Refresh
-                    </Button>
-                  }
-                />
-                <CardContent className="space-y-3">
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <Input
-                      value={publicTabsSearch}
-                      onChange={e => setPublicTabsSearch(e.target.value)}
-                      placeholder="Search by song, artist, setlist, or publisher"
-                      className="pl-9"
-                    />
-                  </div>
-
-                  <div className="max-h-[calc(100vh-16rem)] min-h-[420px] divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-                    {isPublicTabsLoading && publicTabs.length === 0 ? (
-                      <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-500">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        Loading public tabs…
-                      </div>
-                    ) : publicTabs.length === 0 ? (
-                      <p className="py-12 text-center text-sm text-slate-500">
-                        No public tabs yet. Publish your current setlist to start.
-                      </p>
-                    ) : filteredPublicTabs.length === 0 ? (
-                      <p className="py-12 text-center text-sm text-slate-500">No matching tabs found.</p>
-                    ) : (
-                      filteredPublicTabs.map(publicTab => (
-                        <div
-                          key={publicTab.id}
-                          className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50"
+                  ) : publicTabs.length === 0 ? (
+                    <p className="py-12 text-center text-sm text-slate-500">
+                      No songs yet. Add a song in the editor and press Publish on it.
+                    </p>
+                  ) : filteredPublicTabs.length === 0 ? (
+                    <p className="py-12 text-center text-sm text-slate-500">No matching songs.</p>
+                  ) : (
+                    filteredPublicTabs.map(publicTab => (
+                      <div
+                        key={publicTab.id}
+                        className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => openPublicTabPreview(publicTab)}
+                          className="min-w-0 flex-1 text-left"
                         >
-                          <button
-                            type="button"
+                          <div className="truncate text-[15px] font-semibold text-slate-900">
+                            {cleanTabText(publicTab.setlistTitle)}
+                          </div>
+                          <div className="truncate text-sm text-slate-500">
+                            {describeLibraryTab(publicTab)}
+                          </div>
+                        </button>
+                        <div className="flex flex-shrink-0 items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
                             onClick={() => openPublicTabPreview(publicTab)}
-                            className="min-w-0 flex-1 text-left"
+                            className="h-8 px-2.5"
                           >
-                            <div className="truncate text-[15px] font-semibold text-slate-900">
-                              {publicTab.setlistTitle}
-                            </div>
-                            <div className="truncate text-sm text-slate-500">
-                              {publicTab.publisherName} · {pluralize(publicTab.songs.length, "song")} ·{" "}
-                              {new Date(publicTab.publishedAt).toLocaleDateString()}
-                            </div>
-                          </button>
-                          <div className="flex flex-shrink-0 items-center gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openPublicTabPreview(publicTab)}
-                              className="h-8 px-2.5"
-                            >
-                              <Eye className="h-4 w-4 sm:mr-1.5" />
-                              <span className="hidden sm:inline">Preview</span>
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => addPublicTabToSetlist(publicTab)}
-                              className="h-8 px-2.5"
-                            >
-                              <Plus className="h-4 w-4 sm:mr-1.5" />
-                              <span className="hidden sm:inline">Add</span>
-                            </Button>
-                            {deletePassword.trim() && (
+                            <Eye className="h-4 w-4 sm:mr-1.5" />
+                            <span className="hidden sm:inline">Preview</span>
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => addPublicTabToSetlist(publicTab)}
+                            className="h-8 px-2.5"
+                          >
+                            <Plus className="h-4 w-4 sm:mr-1.5" />
+                            <span className="hidden sm:inline">Add</span>
+                          </Button>
+                          {canEdit && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => openSongEditor(publicTab)}
+                                className="h-8 w-8 text-slate-600"
+                                title="Edit song"
+                              >
+                                <Edit3 className="h-4 w-4" />
+                              </Button>
                               <Button
                                 variant="ghost"
                                 size="icon"
                                 onClick={() => deletePublicTab(publicTab)}
                                 disabled={deletingTabId === publicTab.id}
                                 className="h-8 w-8 text-red-500 hover:bg-red-50 hover:text-red-700"
-                                title="Delete tab"
+                                title="Delete song"
                               >
                                 {deletingTabId === publicTab.id ? (
                                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -2550,15 +2946,15 @@ export default function ChordTransposer() {
                                   <Trash2 className="h-4 w-4" />
                                 )}
                               </Button>
-                            )}
-                          </div>
+                            </>
+                          )}
                         </div>
-                      ))
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
           )}
         </div>
       </main>
@@ -2577,7 +2973,7 @@ export default function ChordTransposer() {
             <SectionHeading
               icon={<Upload className="h-5 w-5" />}
               title="Publish song"
-              description="Share this song to the public tab list."
+              description="Add this song to the shared library so anyone can use it in a setlist."
             />
             <CardContent className="space-y-4">
               <div className="space-y-1.5">
@@ -2707,8 +3103,12 @@ export default function ChordTransposer() {
                   </section>
                 ))
               )}
-              {previewPublicTab && deletePassword.trim() && (
-                <div className="flex justify-end">
+              {previewPublicTab && canEdit && (
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => openSongEditor(previewPublicTab)}>
+                    <Edit3 className="mr-2 h-4 w-4" />
+                    Edit
+                  </Button>
                   <Button
                     variant="outline"
                     onClick={() => deletePublicTab(previewPublicTab)}
@@ -2720,10 +3120,95 @@ export default function ChordTransposer() {
                     ) : (
                       <Trash2 className="mr-2 h-4 w-4" />
                     )}
-                    Delete from public tabs
+                    Delete
                   </Button>
                 </div>
               )}
+            </CardContent>
+          </Card>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={songEditTarget !== null}
+        onOpenChange={open => {
+          if (!open && !isSavingSongEdit) setSongEditTarget(null)
+        }}
+      >
+        <DialogContent className="flex items-start justify-center overflow-y-auto bg-transparent p-4 sm:p-8">
+          <Card className="w-full max-w-3xl shadow-xl">
+            <SectionHeading
+              icon={<Edit3 className="h-5 w-5" />}
+              title="Edit song"
+              description="Changes are saved to the shared library for everyone."
+            />
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div className="space-y-1.5 sm:col-span-1">
+                  <Label htmlFor="song-edit-title">Title</Label>
+                  <Input
+                    id="song-edit-title"
+                    value={songEditTitle}
+                    onChange={e => setSongEditTitle(e.target.value)}
+                  />
+                </div>
+                {songEditTarget?.songs.length === 1 && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="song-edit-artist">Artist</Label>
+                    <Input
+                      id="song-edit-artist"
+                      value={songEditArtist}
+                      onChange={e => setSongEditArtist(e.target.value)}
+                    />
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label htmlFor="song-edit-publisher">Published by</Label>
+                  <Input
+                    id="song-edit-publisher"
+                    value={songEditPublisher}
+                    onChange={e => setSongEditPublisher(e.target.value)}
+                    placeholder="Anonymous"
+                  />
+                </div>
+              </div>
+              {songEditTarget?.songs.length === 1 ? (
+                <div className="space-y-1.5">
+                  <Label htmlFor="song-edit-text">Chord sheet</Label>
+                  <textarea
+                    id="song-edit-text"
+                    value={songEditText}
+                    onChange={e => setSongEditText(e.target.value)}
+                    className="min-h-[360px] w-full rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    style={{ fontFamily: getBrowserFontStack(monoFont) }}
+                  />
+                  <p className="text-sm text-slate-500">
+                    Chord lines are detected automatically, like pasted tab text.
+                  </p>
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">
+                  This is a mash-up of {songEditTarget?.songs.length} songs, so only its title and
+                  publisher can be edited here.
+                </p>
+              )}
+              <div className="flex justify-end gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => setSongEditTarget(null)}
+                  disabled={isSavingSongEdit}
+                >
+                  Cancel
+                </Button>
+                <Button onClick={saveSongEdit} disabled={isSavingSongEdit || !songEditTitle.trim()}>
+                  {isSavingSongEdit ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Save className="mr-2 h-4 w-4" />
+                  )}
+                  Save changes
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </DialogContent>
