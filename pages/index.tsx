@@ -19,9 +19,7 @@ import {
   extractTabFromHtml,
   extractUrls,
   isUltimateGuitarUrl,
-  buildSendToTabsBookmarklet,
-  decodeImportPayload,
-  type ImportedTabPayload,
+  cleanTabText,
   normalizeUltimateGuitarUrl,
   type UltimateGuitarTab,
 } from "../lib/ultimate-guitar"
@@ -177,10 +175,10 @@ function songsFromSaved(saved: SavedSetlist): SongData[] {
   return saved.songs.map(song => ({
     id: createId(),
     uri: song.uri,
-    artist: song.artist,
-    song: song.song,
-    chords: song.chords,
-    transposedChords: song.chords,
+    artist: cleanTabText(song.artist),
+    song: cleanTabText(song.song),
+    chords: cleanTabText(song.chords),
+    transposedChords: cleanTabText(song.chords),
     transposeStep: song.transposeStep,
   }))
 }
@@ -193,11 +191,12 @@ function setlistFingerprint(
 ): string {
   return JSON.stringify({
     name: name.trim(),
+    // Cleaned so setlists saved before entity decoding don't show as changed.
     songs: songs.map(({ uri, artist, song, chords, transposeStep }) => [
       uri,
-      artist,
-      song,
-      chords,
+      cleanTabText(artist),
+      cleanTabText(song),
+      cleanTabText(chords),
       transposeStep,
     ]),
     settings,
@@ -220,58 +219,8 @@ function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`
 }
 
-// Bridge exposed by the Mac app (desktop/preload.js). Requests go out from
-// the user's own Mac rather than our hosting provider's servers.
-interface TabsDesktopBridge {
-  fetchTabPage(url: string): Promise<{ ok: boolean; status: number; html: string }>
-  openTabPage(url: string): Promise<ImportedTabPayload | null>
-}
-
-declare global {
-  interface Window {
-    tabsDesktop?: TabsDesktopBridge
-  }
-}
-
-// Text read off the rendered page has no [ch] markup; detect chord lines ourselves.
-function importedTabToSong(payload: ImportedTabPayload): UltimateGuitarTab {
-  const song = payload.song?.trim() || "Untitled Song"
-  const artist = payload.artist?.trim() || "Unknown Artist"
-  let content = (payload.content || "").replace(/\r\n/g, "\n")
-  if (!content.includes("[ch]")) {
-    try {
-      content = parsePastedSong(`Title: ${song}\nArtist: ${artist}\n\n${content}`).chords
-    } catch {
-      // keep the raw text
-    }
-  }
-  return { song, artist, content }
-}
-
-async function fetchTabViaDesktopApp(
-  bridge: TabsDesktopBridge,
-  tabUrl: string
-): Promise<UltimateGuitarTab> {
-  try {
-    const page = await bridge.fetchTabPage(tabUrl)
-    const tab = page.ok ? extractTabFromHtml(page.html) : null
-    if (tab) return tab
-    console.warn("Direct page load failed, opening the page in a window:", page.status)
-  } catch (err) {
-    console.warn("Direct page load failed, opening the page in a window:", err)
-  }
-
-  const payload = await bridge.openTabPage(tabUrl)
-  if (!payload?.content) throw new Error("no chords found on the page")
-  return importedTabToSong(payload)
-}
-
 async function fetchUltimateGuitarTab(rawUrl: string): Promise<UltimateGuitarTab> {
   const tabUrl = normalizeUltimateGuitarUrl(rawUrl)
-  if (typeof window !== "undefined" && window.tabsDesktop) {
-    return fetchTabViaDesktopApp(window.tabsDesktop, tabUrl)
-  }
-
   let serverFailure = ""
 
   try {
@@ -308,7 +257,7 @@ async function fetchUltimateGuitarTab(rawUrl: string): Promise<UltimateGuitarTab
 
 // Renders [ch]G[/ch] markup with chord names highlighted for on-screen reading.
 function renderChordText(input: string): ReactNode[] {
-  const text = input.replace(/\[tab\]|\[\/tab\]/g, "").replace(/\r\n/g, "\n")
+  const text = cleanTabText(input).replace(/\[tab\]|\[\/tab\]/g, "")
   return text.split(/\[ch\](.*?)\[\/ch\]/g).map((segment, index) =>
     index % 2 === 1 ? (
       <span key={index} className="font-bold text-primary">
@@ -416,7 +365,7 @@ function chordifyLine(line: string): string {
 }
 
 function parsePastedSong(rawText: string): ParsedPastedSong {
-  const normalizedText = rawText.replace(/\r\n/g, "\n").trim()
+  const normalizedText = cleanTabText(rawText).trim()
   if (!normalizedText) throw new Error("Paste song text before importing.")
 
   const lines = normalizedText.split("\n")
@@ -571,15 +520,12 @@ export default function ChordTransposer() {
   const [savedSetlists, setSavedSetlists] = useState<SavedSetlist[]>([])
   const [savedSetlistSearch, setSavedSetlistSearch] = useState("")
   const [hasHydrated, setHasHydrated] = useState(false)
-  const [isDesktopApp, setIsDesktopApp] = useState(false)
 
   // Adding songs
   const [linkInput, setLinkInput] = useState("")
   const [loadingProgress, setLoadingProgress] = useState<{ done: number; total: number } | null>(null)
   const [pastedTabText, setPastedTabText] = useState("")
-  const [isPasteOpen, setIsPasteOpen] = useState(false)
-  const [isBookmarkletOpen, setIsBookmarkletOpen] = useState(false)
-  const [bookmarkletCopied, setBookmarkletCopied] = useState(false)
+  const [isPasteOpen, setIsPasteOpen] = useState(true)
   const [editingSongId, setEditingSongId] = useState<string | null>(null)
 
   // PDF + export
@@ -681,10 +627,10 @@ export default function ChordTransposer() {
       working.songs.map(song => ({
         id: song.id || createId(),
         uri: song.uri,
-        artist: song.artist,
-        song: song.song,
-        chords: song.chords,
-        transposedChords: song.chords,
+        artist: cleanTabText(song.artist),
+        song: cleanTabText(song.song),
+        chords: cleanTabText(song.chords),
+        transposedChords: cleanTabText(song.chords),
         transposeStep: song.transposeStep || 0,
       }))
     )
@@ -698,33 +644,6 @@ export default function ChordTransposer() {
     }
   }, [])
 
-  // Songs sent from an Ultimate Guitar page by the "Send to tabs" bookmarklet
-  // arrive as #import=<base64 json>.
-  const importSongFromHash = useCallback(() => {
-    const payload = decodeImportPayload(window.location.hash)
-    if (!payload?.content) return
-
-    window.history.replaceState(null, "", window.location.pathname + window.location.search)
-
-    const { song: songName, artist, content: chords } = importedTabToSong(payload)
-
-    const id = createId()
-    setSongs(prev => [
-      ...prev,
-      {
-        id,
-        uri: payload.url && isUltimateGuitarUrl(payload.url) ? payload.url : `manual://imported/${id}`,
-        artist,
-        song: songName,
-        chords,
-        transposedChords: chords,
-        transposeStep: 0,
-      },
-    ])
-    setView("editor")
-    showNotice(`Added "${songName}" from Ultimate Guitar`)
-  }, [showNotice])
-
   const lastWrittenWorkingRef = useRef<string | null>(null)
 
   useEffect(() => {
@@ -732,12 +651,9 @@ export default function ChordTransposer() {
     if (Array.isArray(storedSetlists)) setSavedSetlists(storedSetlists)
 
     applyWorkingSetlist(readStorage<WorkingSetlist>(WORKING_SETLIST_STORAGE_KEY))
-    importSongFromHash()
-    setIsDesktopApp(Boolean(window.tabsDesktop))
     setHasHydrated(true)
 
-    // Keep several open tabs of the app in sync (e.g. a song sent from
-    // Ultimate Guitar opens/updates another tab).
+    // Keep several open tabs of the app in sync.
     const handleStorage = (event: StorageEvent) => {
       if (event.key === SAVED_SETLISTS_STORAGE_KEY) {
         const next = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
@@ -754,12 +670,8 @@ export default function ChordTransposer() {
     }
 
     window.addEventListener("storage", handleStorage)
-    window.addEventListener("hashchange", importSongFromHash)
-    return () => {
-      window.removeEventListener("storage", handleStorage)
-      window.removeEventListener("hashchange", importSongFromHash)
-    }
-  }, [applyWorkingSetlist, importSongFromHash])
+    return () => window.removeEventListener("storage", handleStorage)
+  }, [applyWorkingSetlist])
 
   useEffect(() => {
     if (!hasHydrated) return
@@ -947,20 +859,16 @@ export default function ChordTransposer() {
     setLinkInput(failed.join("\n"))
 
     if (failed.length > 0) {
-      if (!isDesktopApp) setIsBookmarkletOpen(true)
+      setIsPasteOpen(true)
       setError(
         `Couldn't load ${pluralize(failed.length, "link")}. ${
           added > 0 ? `Added ${pluralize(added, "song")}. ` : ""
-        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box. ${
-          isDesktopApp
-            ? "Try again, or paste the tab text."
-            : 'Ultimate Guitar may be blocking automatic downloads — use the "Send to tabs" button below, or paste the tab text.'
-        }`
+        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box, or paste the tab text below.`
       )
     } else {
       showNotice(`Added ${pluralize(added, "song")}`)
     }
-  }, [linkInput, showNotice, isDesktopApp])
+  }, [linkInput, showNotice])
 
   const addOrConfirmPastedSong = useCallback(() => {
     if (!pastedTabText.trim()) {
@@ -1265,10 +1173,10 @@ export default function ChordTransposer() {
       const importedSongs: SongData[] = publicTab.songs.map((song, index) => ({
         id: createId(),
         uri: `public://${publicTab.id}/${index}`,
-        artist: song.artist,
-        song: song.song,
-        chords: song.transposedChords,
-        transposedChords: song.transposedChords,
+        artist: cleanTabText(song.artist),
+        song: cleanTabText(song.song),
+        chords: cleanTabText(song.transposedChords),
+        transposedChords: cleanTabText(song.transposedChords),
         transposeStep: 0,
       }))
 
@@ -1755,69 +1663,6 @@ export default function ChordTransposer() {
                         </Button>
                       </div>
                     </div>
-
-                    {!isDesktopApp && (
-                      <div className="rounded-lg border border-slate-200 bg-slate-50">
-                        <button
-                          type="button"
-                          onClick={() => setIsBookmarkletOpen(prev => !prev)}
-                          className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-slate-700 hover:text-slate-900"
-                          aria-expanded={isBookmarkletOpen}
-                        >
-                          <span>Link not loading? Send songs straight from Ultimate Guitar</span>
-                          {isBookmarkletOpen ? (
-                            <ChevronUp className="h-4 w-4 flex-shrink-0" />
-                          ) : (
-                            <ChevronDown className="h-4 w-4 flex-shrink-0" />
-                          )}
-                        </button>
-                        {isBookmarkletOpen && (
-                          <div className="space-y-3 border-t border-slate-200 px-3 pb-3 pt-3 text-sm text-slate-600">
-                            <ol className="list-decimal space-y-1 pl-5">
-                              <li>
-                                Drag this button to your bookmarks bar:{" "}
-                                <a
-                                  ref={node => {
-                                    node?.setAttribute("href", buildSendToTabsBookmarklet(window.location.origin))
-                                  }}
-                                  draggable
-                                  onClick={e => {
-                                    e.preventDefault()
-                                    showNotice("Drag the \"Send to tabs\" button onto your bookmarks bar, then click it on an Ultimate Guitar song page.")
-                                  }}
-                                  className="ml-1 inline-flex cursor-grab items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground shadow-sm active:cursor-grabbing"
-                                >
-                                  <Music2 className="h-3.5 w-3.5" />
-                                  Send to tabs
-                                </a>
-                              </li>
-                              <li>Open any song on Ultimate Guitar like you normally would.</li>
-                              <li>Click <strong>Send to tabs</strong> in your bookmarks — the song is added here.</li>
-                            </ol>
-                            <p className="text-slate-500">
-                              On a phone, bookmark any page, then edit the bookmark and replace its address with this code:{" "}
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    await navigator.clipboard.writeText(
-                                      buildSendToTabsBookmarklet(window.location.origin)
-                                    )
-                                    setBookmarkletCopied(true)
-                                    setTimeout(() => setBookmarkletCopied(false), 2000)
-                                  } catch {
-                                    setError("Couldn't copy to clipboard.")
-                                  }
-                                }}
-                                className="font-medium text-primary hover:underline"
-                              >
-                                {bookmarkletCopied ? "Copied!" : "copy bookmark code"}
-                              </button>
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    )}
 
                     <Separator />
 
@@ -2849,7 +2694,8 @@ export default function ChordTransposer() {
                     className="rounded-lg border border-slate-200 bg-slate-50 p-4"
                   >
                     <h4 className="text-base font-semibold">
-                      {song.song} <span className="font-normal text-slate-500">· {song.artist}</span>
+                      {cleanTabText(song.song)}{" "}
+                      <span className="font-normal text-slate-500">· {cleanTabText(song.artist)}</span>
                     </h4>
                     <pre
                       className="mt-3 overflow-x-auto whitespace-pre text-sm leading-6 text-slate-800"

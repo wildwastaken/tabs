@@ -47,18 +47,74 @@ const namedEntities: Record<string, string> = {
   gt: ">",
   quot: "\"",
   apos: "'",
-  nbsp: " ",
+  nbsp: "\u00a0",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  sbquo: "\u201a",
+  ldquo: "\u201c",
+  rdquo: "\u201d",
+  bdquo: "\u201e",
+  prime: "\u2032",
+  ndash: "\u2013",
+  mdash: "\u2014",
+  hellip: "\u2026",
+  bull: "\u2022",
+  middot: "\u00b7",
+  deg: "\u00b0",
+  copy: "\u00a9",
+  reg: "\u00ae",
+  trade: "\u2122",
+  sharp: "\u266f",
+  flat: "\u266d",
+  natur: "\u266e",
+  times: "\u00d7",
+  szlig: "\u00df",
+}
+
+// Accented letters: &eacute; &Uuml; &ntilde; ...
+const accentMarks: Record<string, string> = {
+  acute: "\u0301",
+  grave: "\u0300",
+  circ: "\u0302",
+  tilde: "\u0303",
+  uml: "\u0308",
+  cedil: "\u0327",
+  ring: "\u030a",
+}
+
+function decodeNamedEntity(name: string): string | undefined {
+  if (namedEntities[name] !== undefined) return namedEntities[name]
+  if (namedEntities[name.toLowerCase()] !== undefined && /^[A-Z]+$/.test(name)) {
+    return namedEntities[name.toLowerCase()]
+  }
+  const accentMatch = name.match(/^([a-zA-Z])(acute|grave|circ|tilde|uml|cedil|ring)$/)
+  if (accentMatch) return (accentMatch[1] + accentMarks[accentMatch[2]]).normalize("NFC")
+  return undefined
 }
 
 export function decodeHtmlEntities(input: string): string {
-  return input.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, code: string) => {
+  return input.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+\d*);/gi, (entity, code: string) => {
     if (code[0] === "#") {
       const isHex = code[1] === "x" || code[1] === "X"
       const value = Number.parseInt(code.slice(isHex ? 2 : 1), isHex ? 16 : 10)
-      return Number.isFinite(value) ? String.fromCodePoint(value) : entity
+      return Number.isFinite(value) && value > 0 && value <= 0x10ffff
+        ? String.fromCodePoint(value)
+        : entity
     }
-    return namedEntities[code.toLowerCase()] ?? entity
+    return decodeNamedEntity(code) ?? entity
   })
+}
+
+// Ultimate Guitar stores lyrics with HTML entities (e.g. "can&rsquo;t") inside
+// its JSON. Decode them, and swap typographic punctuation for plain ASCII of
+// the same width so chord columns stay aligned and PDF fallback fonts render it.
+export function cleanTabText(input: string): string {
+  return decodeHtmlEntities(input)
+    .replace(/[\u2018\u2019\u201a\u2032]/g, "'")
+    .replace(/[\u201c\u201d\u201e]/g, "\"")
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n/g, "\n")
 }
 
 function getPath(obj: unknown, path: string[]): unknown {
@@ -120,9 +176,9 @@ export function extractTabFromStore(store: unknown): UltimateGuitarTab | null {
   )
 
   return {
-    artist: artist || "Unknown Artist",
-    song: song || "Unknown Song",
-    content: content.replace(/\r\n/g, "\n"),
+    artist: cleanTabText(artist) || "Unknown Artist",
+    song: cleanTabText(song) || "Unknown Song",
+    content: cleanTabText(content),
   }
 }
 
@@ -152,51 +208,4 @@ export function extractTabFromHtml(html: string): UltimateGuitarTab | null {
   }
 
   return null
-}
-
-export interface ImportedTabPayload {
-  song?: string
-  artist?: string
-  content?: string
-  url?: string
-}
-
-// Bookmarklet the user runs on an Ultimate Guitar page in their own browser.
-// It reads the tab from the page they already have open and hands it to the
-// app through the URL fragment (never sent to any server).
-export function buildSendToTabsBookmarklet(appOrigin: string): string {
-  const source = `(function(){
-var song="",artist="",content="";
-try{
-var el=document.querySelector(".js-store");
-var d=JSON.parse(el.getAttribute("data-content"));
-var p=(d.store||d).page.data;
-content=p.tab_view.wiki_tab.content;
-song=p.tab.song_name;artist=p.tab.artist_name;
-}catch(e){}
-if(!content){
-var pre=document.querySelector("pre");
-if(pre)content=pre.innerText;
-var h=document.querySelector("h1");
-if(h)song=h.innerText.replace(/\\s+(chords|tab|tabs|ukulele|bass)\\s*$/i,"");
-}
-if(!content){alert("Could not find chords on this page. Open a chords/tab page on Ultimate Guitar first.");return;}
-var json=JSON.stringify({song:song,artist:artist,content:content,url:location.href.split(/[?#]/)[0]});
-var b64=btoa(unescape(encodeURIComponent(json))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");
-window.open(${JSON.stringify(appOrigin)}+"/#import="+b64,"tabs-app");
-})();`
-  return `javascript:${encodeURIComponent(source.replace(/\n/g, ""))}`
-}
-
-export function decodeImportPayload(hash: string): ImportedTabPayload | null {
-  const match = hash.match(/^#import=([A-Za-z0-9_-]+)$/)
-  if (!match) return null
-  try {
-    const base64 = match[1].replace(/-/g, "+").replace(/_/g, "/")
-    const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0))
-    const payload = JSON.parse(new TextDecoder().decode(bytes)) as ImportedTabPayload
-    return typeof payload.content === "string" && payload.content.trim() ? payload : null
-  } catch {
-    return null
-  }
 }
