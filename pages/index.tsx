@@ -5,6 +5,8 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
+  type ReactNode,
 } from "react"
 import {
   parse,
@@ -13,11 +15,21 @@ import {
 } from "chord-magic/dist/chord-magic.cjs.js"
 import generatePDF from "../lib/generate-pdf"
 import generateDocx from "../lib/generate-docx"
+import {
+  extractTabFromHtml,
+  extractUrls,
+  isUltimateGuitarUrl,
+  cleanTabText,
+  normalizeUltimateGuitarUrl,
+  type UltimateGuitarTab,
+} from "../lib/ultimate-guitar"
 import type {
   ExportSettings,
   MonoFontOption,
   PositionedNoteBox,
   PublicTabEntry,
+  SavedSetlist,
+  SavedSetlistSettings,
 } from "../types/setlist"
 import { Input } from "../components/ui/input"
 import { Slider } from "../components/ui/slider"
@@ -31,25 +43,23 @@ import {
   CardTitle,
   CardDescription,
 } from "../components/ui/card"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { Separator } from "../components/ui/separator"
 import { Dialog, DialogContent } from "../components/ui/dialog"
 import { FullScreenPDFViewer } from "../components/FullScreenPDFViewer"
+import { cn } from "../lib/utils"
 import {
-  Music,
   FileText,
-  // LinkIcon,        // --- LIBRARY DISABLED ---
-  // ArrowUpDown,     // --- LIBRARY DISABLED ---
   FileDown,
   Loader2,
   AlertCircle,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Music2,
   Maximize,
   Plus,
+  Minus,
   Trash2,
-  // GripVertical,    // --- LIBRARY DISABLED ---
   List,
   Copy,
   Check,
@@ -59,18 +69,30 @@ import {
   RefreshCw,
   Edit3,
   Eye,
-  // Library,         // --- LIBRARY DISABLED ---
-  // Search,          // --- LIBRARY DISABLED ---
-  // X,               // --- LIBRARY DISABLED ---
+  Save,
+  FolderOpen,
+  FilePlus2,
+  ListPlus,
+  Search,
+  ClipboardPaste,
+  Link as LinkIcon,
+  X,
+  SlidersHorizontal,
+  StickyNote,
 } from "lucide-react"
 
-const corsURI = "https://api.codetabs.com/v1/proxy/?quest="
 const MIN_NOTE_BOX_DIMENSION = 0.02
+const SAVED_SETLISTS_STORAGE_KEY = "tabs.savedSetlists.v1"
+const WORKING_SETLIST_STORAGE_KEY = "tabs.workingSetlist.v1"
 
-// Fix 1: Replace 'any' with proper type definitions
-interface ObjectWithKey {
-  [key: string]: unknown
-}
+// Browser-side fallbacks, used only if our own /api/fetch-tab route fails.
+const CLIENT_PROXIES: Array<(url: string) => string> = [
+  url => `https://api.codetabs.com/v1/proxy/?quest=${url}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?url=${encodeURIComponent(url)}`,
+]
+
+type WorkspaceView = "editor" | "saved" | "published"
 
 interface SongData {
   id: string
@@ -92,30 +114,159 @@ interface PublicTabsResponse {
   tabs: PublicTabEntry[]
 }
 
-// --- LIBRARY DISABLED ---
-/*
-interface SavedSong {
-  uri: string
-  artist: string
-  song: string
-  addedAt: number
+interface WorkingSetlist {
+  name: string
+  savedSetlistId: string | null
+  songs: Array<Omit<SongData, "transposedChords">>
+  settings: SavedSetlistSettings
 }
-*/
 
-function findInObject(obj: ObjectWithKey, key: string): unknown[] {
-  let objects: unknown[] = []
-  const keys = Object.keys(obj || {})
-  for (let i = 0; i < keys.length; i += 1) {
-    const _key = keys[i]
-    if (Object.prototype.hasOwnProperty.call(obj, _key)) {
-      if (typeof obj[_key] === "object" && obj[_key] !== null) {
-        objects = [...objects, ...findInObject(obj[_key] as ObjectWithKey, key)]
-      } else if (_key === key) {
-        objects.push(obj[_key])
-      }
+// Deterministic serialization (fixed key order, no derived fields) so that
+// syncing between browser tabs settles instead of echoing writes back and forth.
+function serializeWorkingSetlist(
+  name: string,
+  savedSetlistId: string | null,
+  songs: SongData[],
+  settings: SavedSetlistSettings
+): string {
+  const working: WorkingSetlist = {
+    name,
+    savedSetlistId,
+    songs: songs.map(({ id, uri, artist, song, chords, transposeStep }) => ({
+      id,
+      uri,
+      artist,
+      song,
+      chords,
+      transposeStep,
+    })),
+    settings: {
+      fontSize: settings.fontSize,
+      autoLinebreak: settings.autoLinebreak,
+      monoFont: settings.monoFont,
+      noteBoxes: settings.noteBoxes,
+    },
+  }
+  return JSON.stringify(working)
+}
+
+function createId(): string {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function readStorage<T>(key: string): T | null {
+  try {
+    const raw = window.localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : null
+  } catch {
+    return null
+  }
+}
+
+function writeStorage(key: string, value: unknown) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value))
+  } catch (err) {
+    console.error(`Failed to write ${key} to localStorage:`, err)
+  }
+}
+
+function songsFromSaved(saved: SavedSetlist): SongData[] {
+  return saved.songs.map(song => ({
+    id: createId(),
+    uri: song.uri,
+    artist: cleanTabText(song.artist),
+    song: cleanTabText(song.song),
+    chords: cleanTabText(song.chords),
+    transposedChords: cleanTabText(song.chords),
+    transposeStep: song.transposeStep,
+  }))
+}
+
+// Stable fingerprint used to detect unsaved changes.
+function setlistFingerprint(
+  name: string,
+  songs: Array<Pick<SongData, "uri" | "artist" | "song" | "chords" | "transposeStep">>,
+  settings: SavedSetlistSettings
+): string {
+  return JSON.stringify({
+    name: name.trim(),
+    // Cleaned so setlists saved before entity decoding don't show as changed.
+    songs: songs.map(({ uri, artist, song, chords, transposeStep }) => [
+      uri,
+      cleanTabText(artist),
+      cleanTabText(song),
+      cleanTabText(chords),
+      transposeStep,
+    ]),
+    settings,
+  })
+}
+
+function formatRelativeTime(isoDate: string): string {
+  const diffSeconds = Math.round((Date.now() - new Date(isoDate).getTime()) / 1000)
+  if (diffSeconds < 45) return "just now"
+  const minutes = Math.round(diffSeconds / 60)
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return `${hours} hr ago`
+  const days = Math.round(hours / 24)
+  if (days < 7) return `${days} ${days === 1 ? "day" : "days"} ago`
+  return new Date(isoDate).toLocaleDateString()
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`
+}
+
+async function fetchUltimateGuitarTab(rawUrl: string): Promise<UltimateGuitarTab> {
+  const tabUrl = normalizeUltimateGuitarUrl(rawUrl)
+  let serverFailure = ""
+
+  try {
+    const res = await fetch(`/api/fetch-tab?url=${encodeURIComponent(tabUrl)}`, {
+      cache: "no-store",
+    })
+    const body = (await res.json()) as Partial<UltimateGuitarTab> & {
+      sourceUrl?: string
+      details?: string
+    }
+    // Guard against a cached response for a different tab.
+    if (res.ok && body.content && body.sourceUrl === tabUrl) {
+      return body as UltimateGuitarTab
+    }
+    serverFailure = body.details || (res.ok ? "response was for a different tab" : `status ${res.status}`)
+  } catch (err) {
+    serverFailure = err instanceof Error ? err.message : String(err)
+  }
+  console.warn("Server tab fetch failed, trying browser proxies:", serverFailure)
+
+  for (const buildProxyUrl of CLIENT_PROXIES) {
+    try {
+      const res = await fetch(buildProxyUrl(tabUrl))
+      if (!res.ok) continue
+      const tab = extractTabFromHtml(await res.text())
+      if (tab) return tab
+    } catch {
+      // try the next proxy
     }
   }
-  return objects
+
+  throw new Error(serverFailure || "Could not load chords for this link.")
+}
+
+// Renders [ch]G[/ch] markup with chord names highlighted for on-screen reading.
+function renderChordText(input: string): ReactNode[] {
+  const text = cleanTabText(input).replace(/\[tab\]|\[\/tab\]/g, "")
+  return text.split(/\[ch\](.*?)\[\/ch\]/g).map((segment, index) =>
+    index % 2 === 1 ? (
+      <span key={index} className="font-bold text-primary">
+        {segment}
+      </span>
+    ) : (
+      segment
+    )
+  )
 }
 
 const metadataLinePattern = /^(Title|Artist|Key|Capo)\s*:\s*(.+)$/i
@@ -214,7 +365,7 @@ function chordifyLine(line: string): string {
 }
 
 function parsePastedSong(rawText: string): ParsedPastedSong {
-  const normalizedText = rawText.replace(/\r\n/g, "\n").trim()
+  const normalizedText = cleanTabText(rawText).trim()
   if (!normalizedText) throw new Error("Paste song text before importing.")
 
   const lines = normalizedText.split("\n")
@@ -290,41 +441,119 @@ function stripChordMarkup(input: string): string {
     .replace(/\r\n/g, "\n")
 }
 
+function NoteBoxField({
+  label,
+  value,
+  min,
+  fallback,
+  onChange,
+}: {
+  label: string
+  value: number
+  min: number
+  fallback: number
+  onChange: (value: number) => void
+}) {
+  const clamp = (next: number) => Math.max(min, Math.min(1, Number.isFinite(next) ? next : fallback))
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-sm">{label}</Label>
+        <Input
+          type="number"
+          step={0.01}
+          min={min}
+          max={1}
+          value={value}
+          onChange={e => onChange(clamp(Number.parseFloat(e.target.value)))}
+          className="h-8 w-20 text-right tabular-nums"
+        />
+      </div>
+      <Slider
+        min={min}
+        max={1}
+        step={0.01}
+        value={[value]}
+        onValueChange={next => onChange(clamp(next[0]))}
+      />
+    </div>
+  )
+}
+
+function SectionHeading({
+  icon,
+  title,
+  description,
+  action,
+}: {
+  icon: ReactNode
+  title: string
+  description?: string
+  action?: ReactNode
+}) {
+  return (
+    <CardHeader className="pb-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <CardTitle className="flex items-center gap-2 text-lg font-semibold">
+            <span className="text-primary">{icon}</span>
+            {title}
+          </CardTitle>
+          {description && (
+            <CardDescription className="mt-1.5 text-sm">{description}</CardDescription>
+          )}
+        </div>
+        {action}
+      </div>
+    </CardHeader>
+  )
+}
+
 export default function ChordTransposer() {
-  // Multi-song state
+  const [view, setView] = useState<WorkspaceView>("editor")
+
+  // Current setlist
   const [songs, setSongs] = useState<SongData[]>([])
-  const [currentUri, setCurrentUri] = useState("")
+  const [setlistName, setSetlistName] = useState("")
+  const [activeSavedSetlistId, setActiveSavedSetlistId] = useState<string | null>(null)
+  const [savedSetlists, setSavedSetlists] = useState<SavedSetlist[]>([])
+  const [savedSetlistSearch, setSavedSetlistSearch] = useState("")
+  const [hasHydrated, setHasHydrated] = useState(false)
+
+  // Adding songs
+  const [linkInput, setLinkInput] = useState("")
+  const [loadingProgress, setLoadingProgress] = useState<{ done: number; total: number } | null>(null)
   const [pastedTabText, setPastedTabText] = useState("")
+  const [isPasteOpen, setIsPasteOpen] = useState(true)
   const [editingSongId, setEditingSongId] = useState<string | null>(null)
 
-  // --- LIBRARY DISABLED ---
-  /*
-  const [savedSongs, setSavedSongs] = useState<SavedSong[]>([])
-  const [librarySearch, setLibrarySearch] = useState("")
-  */
-
+  // PDF + export
   const halftoneStyle = "FLATS"
   const [simplify] = useState(false)
   const [fontSize, setFontSize] = useState(10)
   const [autoLinebreak, setAutoLinebreak] = useState(false)
   const [monoFont, setMonoFont] = useState<MonoFontOption>("roboto-mono")
-  const [workspaceTab, setWorkspaceTab] = useState("editor")
   const [noteBoxes, setNoteBoxes] = useState<PositionedNoteBox[]>([])
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null)
   const [previewNotePage, setPreviewNotePage] = useState(1)
   const [pdfUrl, setPdfUrl] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState("pdf")
   const [isFullScreen, setIsFullScreen] = useState(false)
   const [copySuccess, setCopySuccess] = useState(false)
+  const [isNotesPanelOpen, setIsNotesPanelOpen] = useState(false)
+  const [isAdvancedExportOpen, setIsAdvancedExportOpen] = useState(false)
+
+  // Feedback
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  // Public tabs
   const [publicTabs, setPublicTabs] = useState<PublicTabEntry[]>([])
   const [isPublicTabsLoading, setIsPublicTabsLoading] = useState(false)
   const [isPublishing, setIsPublishing] = useState(false)
   const [isPublishingSong, setIsPublishingSong] = useState(false)
   const [publisherName, setPublisherName] = useState("")
   const [publishTitle, setPublishTitle] = useState("")
-  const [publishMessage, setPublishMessage] = useState<string | null>(null)
   const [isPublishSongDialogOpen, setIsPublishSongDialogOpen] = useState(false)
   const [songToPublish, setSongToPublish] = useState<SongData | null>(null)
   const [publishSongTitle, setPublishSongTitle] = useState("")
@@ -333,9 +562,21 @@ export default function ChordTransposer() {
   const [publicTabsSearch, setPublicTabsSearch] = useState("")
   const [publicSongSearch, setPublicSongSearch] = useState("")
   const [deletePassword, setDeletePassword] = useState("")
-  const [isNotesPanelOpen, setIsNotesPanelOpen] = useState(false)
-  const [isAdvancedExportOpen, setIsAdvancedExportOpen] = useState(false)
   const [deletingTabId, setDeletingTabId] = useState<string | null>(null)
+
+  const isLoadingLinks = loadingProgress !== null
+  const pendingLinks = useMemo(() => extractUrls(linkInput), [linkInput])
+
+  const showNotice = useCallback((message: string) => {
+    setError(null)
+    setNotice(message)
+  }, [])
+
+  useEffect(() => {
+    if (!notice) return
+    const timeout = setTimeout(() => setNotice(null), 4000)
+    return () => clearTimeout(timeout)
+  }, [notice])
 
   const draftParse = useMemo<{
     song: ParsedPastedSong | null
@@ -363,106 +604,271 @@ export default function ChordTransposer() {
 
   const parsedPastedSong = draftParse.song
   const pastedTabError = draftParse.error
-  const canEditNotes = activeTab === "pdf" && Boolean(pdfUrl)
+  const canEditNotes = Boolean(pdfUrl)
 
-  // --- LIBRARY DISABLED ---
-  /*
-  useEffect(() => {
-    const saved = localStorage.getItem("savedSongs")
-    if (saved) {
-      try {
-        setSavedSongs(JSON.parse(saved))
-      } catch (err) {
-        console.error("Failed to load saved songs:", err)
-      }
+  const currentSettings = useMemo<SavedSetlistSettings>(
+    () => ({ fontSize, autoLinebreak, monoFont, noteBoxes }),
+    [fontSize, autoLinebreak, monoFont, noteBoxes]
+  )
+
+  const currentExportSettings = useMemo<ExportSettings>(
+    () => ({
+      monoFont,
+      noteBoxes,
+    }),
+    [monoFont, noteBoxes]
+  )
+
+  // ---------- Persistence (saved setlists + autosaved working setlist) ----------
+
+  const applyWorkingSetlist = useCallback((working: WorkingSetlist | null) => {
+    if (!working || !Array.isArray(working.songs)) return
+    setSongs(
+      working.songs.map(song => ({
+        id: song.id || createId(),
+        uri: song.uri,
+        artist: cleanTabText(song.artist),
+        song: cleanTabText(song.song),
+        chords: cleanTabText(song.chords),
+        transposedChords: cleanTabText(song.chords),
+        transposeStep: song.transposeStep || 0,
+      }))
+    )
+    setSetlistName(working.name || "")
+    setActiveSavedSetlistId(working.savedSetlistId || null)
+    if (working.settings) {
+      setFontSize(working.settings.fontSize ?? 10)
+      setAutoLinebreak(Boolean(working.settings.autoLinebreak))
+      setMonoFont(working.settings.monoFont || "roboto-mono")
+      setNoteBoxes(Array.isArray(working.settings.noteBoxes) ? working.settings.noteBoxes : [])
     }
   }, [])
-  */
 
-  // --- LIBRARY DISABLED ---
-  /*
-  const saveToLibrary = useCallback((uri: string, artist: string, song: string) => {
-    setSavedSongs(prev => {
-      if (prev.some(s => s.uri === uri)) return prev
+  const lastWrittenWorkingRef = useRef<string | null>(null)
 
-      const newSong: SavedSong = {
-        uri,
-        artist,
-        song,
-        addedAt: Date.now()
+  useEffect(() => {
+    const storedSetlists = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
+    if (Array.isArray(storedSetlists)) setSavedSetlists(storedSetlists)
+
+    applyWorkingSetlist(readStorage<WorkingSetlist>(WORKING_SETLIST_STORAGE_KEY))
+    setHasHydrated(true)
+
+    // Keep several open tabs of the app in sync.
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === SAVED_SETLISTS_STORAGE_KEY) {
+        const next = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
+        setSavedSetlists(Array.isArray(next) ? next : [])
+      } else if (event.key === WORKING_SETLIST_STORAGE_KEY && event.newValue) {
+        if (event.newValue === lastWrittenWorkingRef.current) return
+        try {
+          lastWrittenWorkingRef.current = event.newValue
+          applyWorkingSetlist(JSON.parse(event.newValue) as WorkingSetlist)
+        } catch {
+          // ignore malformed data
+        }
       }
+    }
 
-      const updated = [...prev, newSong]
-      localStorage.setItem("savedSongs", JSON.stringify(updated))
-      return updated
-    })
+    window.addEventListener("storage", handleStorage)
+    return () => window.removeEventListener("storage", handleStorage)
+  }, [applyWorkingSetlist])
+
+  useEffect(() => {
+    if (!hasHydrated) return
+    const serialized = serializeWorkingSetlist(
+      setlistName,
+      activeSavedSetlistId,
+      songs,
+      currentSettings
+    )
+    if (serialized === lastWrittenWorkingRef.current) return
+    lastWrittenWorkingRef.current = serialized
+    try {
+      window.localStorage.setItem(WORKING_SETLIST_STORAGE_KEY, serialized)
+    } catch (err) {
+      console.error("Failed to autosave setlist:", err)
+    }
+  }, [hasHydrated, setlistName, activeSavedSetlistId, songs, currentSettings])
+
+  const persistSavedSetlists = useCallback((next: SavedSetlist[]) => {
+    setSavedSetlists(next)
+    writeStorage(SAVED_SETLISTS_STORAGE_KEY, next)
   }, [])
 
-  const clearLibrary = useCallback(() => {
-    setSavedSongs([])
-    localStorage.removeItem("savedSongs")
-  }, [])
-  */
+  const activeSavedSetlist = useMemo(
+    () => savedSetlists.find(setlist => setlist.id === activeSavedSetlistId) || null,
+    [savedSetlists, activeSavedSetlistId]
+  )
 
-  const addSong = useCallback(
-    async (urlToAdd?: string) => {
-      const uri = urlToAdd || currentUri
-      if (!uri.includes("ultimate-guitar.com")) {
-        setError("Please enter a valid Ultimate Guitar URL")
+  const hasUnsavedChanges = useMemo(() => {
+    if (!activeSavedSetlist) return songs.length > 0
+    return (
+      setlistFingerprint(setlistName, songs, currentSettings) !==
+      setlistFingerprint(activeSavedSetlist.name, activeSavedSetlist.songs, activeSavedSetlist.settings)
+    )
+  }, [activeSavedSetlist, setlistName, songs, currentSettings])
+
+  const saveSetlist = useCallback(
+    (asNew = false) => {
+      if (songs.length === 0) {
+        setError("Add at least one song before saving a setlist.")
         return
       }
 
-      setError(null)
-      setIsLoading(true)
-
-      try {
-        const res = await fetch(`${corsURI}${uri}`)
-        if (!res.ok) throw new Error("Failed to fetch song data")
-
-        const text = await res.text()
-        const div = document.createElement("div")
-        div.innerHTML = text
-
-        const store = div.getElementsByClassName("js-store")[0]
-        const storeJson = store?.getAttribute("data-content") || ""
-        if (!storeJson) throw new Error("Could not find song data on the page")
-
-        const storeData = JSON.parse(storeJson)
-        const [parsedSongName] = findInObject(storeData, "song_name") as string[]
-        const [parsedArtistName] = findInObject(storeData, "artist_name") as string[]
-        const [parsedChords] = findInObject(storeData, "content") as string[]
-
-        if (!parsedChords) throw new Error("No chord data found")
-
-        const artist = parsedArtistName || "Unknown Artist"
-        const songName = parsedSongName || "Unknown Song"
-
-        const newSong: SongData = {
-          id: Date.now().toString(),
+      const now = new Date().toISOString()
+      const name = setlistName.trim() || `Setlist ${new Date().toLocaleDateString()}`
+      const existing = asNew ? null : activeSavedSetlist
+      const entry: SavedSetlist = {
+        id: existing?.id || createId(),
+        name,
+        createdAt: existing?.createdAt || now,
+        updatedAt: now,
+        songs: songs.map(({ uri, artist, song, chords, transposeStep }) => ({
           uri,
           artist,
-          song: songName,
-          chords: parsedChords,
-          transposedChords: parsedChords,
+          song,
+          chords,
+          transposeStep,
+        })),
+        settings: currentSettings,
+      }
+
+      persistSavedSetlists(
+        existing
+          ? savedSetlists.map(setlist => (setlist.id === existing.id ? entry : setlist))
+          : [entry, ...savedSetlists]
+      )
+      setSetlistName(name)
+      setActiveSavedSetlistId(entry.id)
+      showNotice(existing ? `Updated "${name}"` : `Saved "${name}"`)
+    },
+    [songs, setlistName, activeSavedSetlist, currentSettings, savedSetlists, persistSavedSetlists, showNotice]
+  )
+
+  const confirmDiscardChanges = useCallback(() => {
+    if (!hasUnsavedChanges || songs.length === 0) return true
+    return window.confirm("Your current setlist has unsaved changes. Discard them?")
+  }, [hasUnsavedChanges, songs.length])
+
+  const openSavedSetlist = useCallback(
+    (saved: SavedSetlist) => {
+      if (saved.id !== activeSavedSetlistId && !confirmDiscardChanges()) return
+
+      setSongs(songsFromSaved(saved))
+      setSetlistName(saved.name)
+      setActiveSavedSetlistId(saved.id)
+      setFontSize(saved.settings?.fontSize ?? 10)
+      setAutoLinebreak(Boolean(saved.settings?.autoLinebreak))
+      setMonoFont(saved.settings?.monoFont || "roboto-mono")
+      setNoteBoxes(saved.settings?.noteBoxes || [])
+      setSelectedNoteId(null)
+      setEditingSongId(null)
+      setPastedTabText("")
+      setView("editor")
+      showNotice(`Opened "${saved.name}"`)
+    },
+    [activeSavedSetlistId, confirmDiscardChanges, showNotice]
+  )
+
+  const appendSavedSetlist = useCallback(
+    (saved: SavedSetlist) => {
+      setSongs(prev => [...prev, ...songsFromSaved(saved)])
+      setView("editor")
+      showNotice(`Added ${pluralize(saved.songs.length, "song")} from "${saved.name}"`)
+    },
+    [showNotice]
+  )
+
+  const deleteSavedSetlist = useCallback(
+    (saved: SavedSetlist) => {
+      if (!window.confirm(`Delete saved setlist "${saved.name}"? This can't be undone.`)) return
+      persistSavedSetlists(savedSetlists.filter(setlist => setlist.id !== saved.id))
+      if (activeSavedSetlistId === saved.id) setActiveSavedSetlistId(null)
+      showNotice(`Deleted "${saved.name}"`)
+    },
+    [savedSetlists, activeSavedSetlistId, persistSavedSetlists, showNotice]
+  )
+
+  const startNewSetlist = useCallback(() => {
+    if (!confirmDiscardChanges()) return
+    setSongs([])
+    setSetlistName("")
+    setActiveSavedSetlistId(null)
+    setNoteBoxes([])
+    setSelectedNoteId(null)
+    setEditingSongId(null)
+    setPastedTabText("")
+  }, [confirmDiscardChanges])
+
+  const filteredSavedSetlists = useMemo(() => {
+    const query = savedSetlistSearch.trim().toLowerCase()
+    const sorted = [...savedSetlists].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    if (!query) return sorted
+    return sorted.filter(setlist =>
+      `${setlist.name} ${setlist.songs.map(song => `${song.song} ${song.artist}`).join(" ")}`
+        .toLowerCase()
+        .includes(query)
+    )
+  }, [savedSetlists, savedSetlistSearch])
+
+  // ---------- Adding songs ----------
+
+  const addSongsFromLinks = useCallback(async () => {
+    const urls = extractUrls(linkInput)
+    if (urls.length === 0) {
+      setError("Paste one or more Ultimate Guitar links.")
+      return
+    }
+
+    const invalid = urls.filter(url => !isUltimateGuitarUrl(url))
+    if (invalid.length > 0) {
+      setError(`Not an Ultimate Guitar link: ${invalid[0]}`)
+      return
+    }
+
+    setError(null)
+    setLoadingProgress({ done: 0, total: urls.length })
+
+    const failed: string[] = []
+    let added = 0
+    let lastFailureReason = ""
+
+    for (const [index, url] of urls.entries()) {
+      try {
+        const tab = await fetchUltimateGuitarTab(url)
+        const newSong: SongData = {
+          id: createId(),
+          uri: normalizeUltimateGuitarUrl(url),
+          artist: tab.artist,
+          song: tab.song,
+          chords: tab.content,
+          transposedChords: tab.content,
           transposeStep: 0,
         }
-
         setSongs(prev => [...prev, newSong])
-
-        // --- LIBRARY DISABLED ---
-        // saveToLibrary(uri, artist, songName)
-
-        setCurrentUri("")
-        setActiveTab("pdf")
+        added += 1
       } catch (err) {
-        console.error("Failed to load song:", err)
-        setError("Failed to load song. Please check the URL and try again.")
-      } finally {
-        setIsLoading(false)
+        console.error("Failed to load song:", url, err)
+        failed.push(url)
+        if (err instanceof Error) lastFailureReason = err.message
       }
-    },
-    [currentUri]
-  )
+      setLoadingProgress({ done: index + 1, total: urls.length })
+    }
+
+    setLoadingProgress(null)
+    setLinkInput(failed.join("\n"))
+
+    if (failed.length > 0) {
+      setIsPasteOpen(true)
+      setError(
+        `Couldn't load ${pluralize(failed.length, "link")}. ${
+          added > 0 ? `Added ${pluralize(added, "song")}. ` : ""
+        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box, or paste the tab text below.`
+      )
+    } else {
+      showNotice(`Added ${pluralize(added, "song")}`)
+    }
+  }, [linkInput, showNotice])
 
   const addOrConfirmPastedSong = useCallback(() => {
     if (!pastedTabText.trim()) {
@@ -487,6 +893,7 @@ export default function ChordTransposer() {
                 song: parsedPastedSong.song,
                 chords: parsedPastedSong.chords,
                 transposedChords: parsedPastedSong.chords,
+                transposeStep: 0,
               }
             : song
         )
@@ -494,11 +901,10 @@ export default function ChordTransposer() {
 
       setEditingSongId(null)
       setPastedTabText("")
-      setActiveTab("pdf")
       return
     }
 
-    const songId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const songId = createId()
     const newSong: SongData = {
       id: songId,
       uri: `manual://pasted/${songId}`,
@@ -511,21 +917,14 @@ export default function ChordTransposer() {
 
     setSongs(prev => [...prev, newSong])
     setPastedTabText("")
-    setActiveTab("pdf")
+    showNotice(`Added "${newSong.song}"`)
   }, [
     pastedTabText,
     parsedPastedSong,
     pastedTabError,
     editingSongId,
+    showNotice,
   ])
-
-  const currentExportSettings = useMemo<ExportSettings>(
-    () => ({
-      monoFont,
-      noteBoxes,
-    }),
-    [monoFont, noteBoxes]
-  )
 
   const previewSongs = useMemo(() => {
     if (!parsedPastedSong || editingSongId) return songs
@@ -544,34 +943,12 @@ export default function ChordTransposer() {
     return [...songs, draftSong]
   }, [songs, parsedPastedSong, editingSongId])
 
+  // ---------- Note boxes ----------
+
   const selectedNoteBox = useMemo(
     () => noteBoxes.find(box => box.id === selectedNoteId) || null,
     [noteBoxes, selectedNoteId]
   )
-
-  const filteredPublicTabs = useMemo(() => {
-    const query = publicTabsSearch.trim().toLowerCase()
-    if (!query) return publicTabs
-
-    return publicTabs.filter(tab => {
-      const songMetadata = tab.songs
-        .map(song => `${song.song} ${song.artist}`)
-        .join(" ")
-      const searchableText = `${tab.setlistTitle} ${tab.publisherName} ${songMetadata}`.toLowerCase()
-      return searchableText.includes(query)
-    })
-  }, [publicTabs, publicTabsSearch])
-
-  const filteredPreviewSongs = useMemo(() => {
-    const songsForPreview = previewPublicTab?.songs || []
-    const query = publicSongSearch.trim().toLowerCase()
-    if (!query) return songsForPreview
-
-    return songsForPreview.filter(song => {
-      const searchableText = `${song.song} ${song.artist} ${stripChordMarkup(song.transposedChords)}`.toLowerCase()
-      return searchableText.includes(query)
-    })
-  }, [previewPublicTab, publicSongSearch])
 
   useEffect(() => {
     if (!selectedNoteId) return
@@ -581,7 +958,7 @@ export default function ChordTransposer() {
 
   const addNoteBox = useCallback(() => {
     const page = Math.max(1, Math.round(previewNotePage))
-    const noteId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const noteId = createId()
     const newNote: PositionedNoteBox = {
       id: noteId,
       page,
@@ -616,6 +993,32 @@ export default function ChordTransposer() {
     setSelectedNoteId(null)
   }, [selectedNoteId])
 
+  // ---------- Public tabs ----------
+
+  const filteredPublicTabs = useMemo(() => {
+    const query = publicTabsSearch.trim().toLowerCase()
+    if (!query) return publicTabs
+
+    return publicTabs.filter(tab => {
+      const songMetadata = tab.songs
+        .map(song => `${song.song} ${song.artist}`)
+        .join(" ")
+      const searchableText = `${tab.setlistTitle} ${tab.publisherName} ${songMetadata}`.toLowerCase()
+      return searchableText.includes(query)
+    })
+  }, [publicTabs, publicTabsSearch])
+
+  const filteredPreviewSongs = useMemo(() => {
+    const songsForPreview = previewPublicTab?.songs || []
+    const query = publicSongSearch.trim().toLowerCase()
+    if (!query) return songsForPreview
+
+    return songsForPreview.filter(song => {
+      const searchableText = `${song.song} ${song.artist} ${stripChordMarkup(song.transposedChords)}`.toLowerCase()
+      return searchableText.includes(query)
+    })
+  }, [previewPublicTab, publicSongSearch])
+
   const loadPublicTabs = useCallback(async () => {
     setIsPublicTabsLoading(true)
     try {
@@ -634,6 +1037,12 @@ export default function ChordTransposer() {
     }
   }, [])
 
+  const defaultPublishTitle =
+    setlistName.trim() ||
+    (songs.length === 1
+      ? `${songs[0].artist} - ${songs[0].song}`
+      : `Setlist (${pluralize(songs.length, "song")})`)
+
   const publishCurrentSetlist = useCallback(async () => {
     if (songs.length === 0) {
       setError("Add at least one song before publishing.")
@@ -641,7 +1050,6 @@ export default function ChordTransposer() {
     }
 
     setIsPublishing(true)
-    setPublishMessage(null)
     setError(null)
 
     try {
@@ -652,11 +1060,7 @@ export default function ChordTransposer() {
         },
         body: JSON.stringify({
           publisherName,
-          setlistTitle:
-            publishTitle ||
-            (songs.length === 1
-              ? `${songs[0].artist} - ${songs[0].song}`
-              : `Setlist (${songs.length} songs)`),
+          setlistTitle: publishTitle.trim() || defaultPublishTitle,
           notes: "",
           exportSettings: {
             monoFont,
@@ -676,7 +1080,7 @@ export default function ChordTransposer() {
         throw new Error(responseBody.error || "Failed to publish setlist")
       }
 
-      setPublishMessage("Published to Public Tabs.")
+      showNotice("Published to Public Tabs.")
       await loadPublicTabs()
     } catch (err) {
       console.error("Failed to publish setlist:", err)
@@ -692,9 +1096,11 @@ export default function ChordTransposer() {
     songs,
     publisherName,
     publishTitle,
+    defaultPublishTitle,
     monoFont,
     noteBoxes,
     loadPublicTabs,
+    showNotice,
   ])
 
   const openPublishSongDialog = useCallback((song: SongData) => {
@@ -715,7 +1121,6 @@ export default function ChordTransposer() {
 
     setIsPublishingSong(true)
     setError(null)
-    setPublishMessage(null)
 
     try {
       const response = await fetch("/api/public-tabs", {
@@ -747,7 +1152,7 @@ export default function ChordTransposer() {
         throw new Error(body.error || "Failed to publish song")
       }
 
-      setPublishMessage(`Published "${songTitle}"`)
+      showNotice(`Published "${songTitle}"`)
       setIsPublishSongDialogOpen(false)
       setSongToPublish(null)
       await loadPublicTabs()
@@ -761,42 +1166,24 @@ export default function ChordTransposer() {
     } finally {
       setIsPublishingSong(false)
     }
-  }, [songToPublish, publishSongTitle, publishSongAuthor, monoFont, noteBoxes, loadPublicTabs])
+  }, [songToPublish, publishSongTitle, publishSongAuthor, monoFont, noteBoxes, loadPublicTabs, showNotice])
 
   const addPublicTabToSetlist = useCallback(
-    (publicTab: PublicTabEntry, applyExportSettings = false) => {
-      const importedSongs: SongData[] = publicTab.songs.map((song, index) => {
-        const importId = `${Date.now()}-${publicTab.id}-${index}`
-        return {
-          id: importId,
-          uri: `public://${publicTab.id}/${index}`,
-          artist: song.artist,
-          song: song.song,
-          chords: song.transposedChords,
-          transposedChords: song.transposedChords,
-          transposeStep: 0,
-        }
-      })
+    (publicTab: PublicTabEntry) => {
+      const importedSongs: SongData[] = publicTab.songs.map((song, index) => ({
+        id: createId(),
+        uri: `public://${publicTab.id}/${index}`,
+        artist: cleanTabText(song.artist),
+        song: cleanTabText(song.song),
+        chords: cleanTabText(song.transposedChords),
+        transposedChords: cleanTabText(song.transposedChords),
+        transposeStep: 0,
+      }))
 
       setSongs(prev => [...prev, ...importedSongs])
-
-      if (applyExportSettings) {
-        setMonoFont(publicTab.exportSettings?.monoFont || "roboto-mono")
-        if (
-          Array.isArray(publicTab.exportSettings?.noteBoxes) &&
-          publicTab.exportSettings.noteBoxes.length > 0
-        ) {
-          setNoteBoxes(publicTab.exportSettings.noteBoxes)
-          setPreviewNotePage(publicTab.exportSettings.noteBoxes[0].page || 1)
-        }
-      }
-
-      setPublishMessage(
-        `Added ${importedSongs.length} ${importedSongs.length === 1 ? "song" : "songs"} to setlist`
-      )
-      setActiveTab("pdf")
+      showNotice(`Added ${pluralize(importedSongs.length, "song")} to your setlist`)
     },
-    []
+    [showNotice]
   )
 
   const openPublicTabPreview = useCallback((publicTab: PublicTabEntry) => {
@@ -817,7 +1204,6 @@ export default function ChordTransposer() {
 
       setDeletingTabId(publicTab.id)
       setError(null)
-      setPublishMessage(null)
 
       try {
         const response = await fetch("/api/public-tabs", {
@@ -840,7 +1226,7 @@ export default function ChordTransposer() {
         if (previewPublicTab?.id === publicTab.id) {
           setPreviewPublicTab(null)
         }
-        setPublishMessage(`Deleted "${publicTab.setlistTitle}"`)
+        showNotice(`Deleted "${publicTab.setlistTitle}"`)
       } catch (err) {
         console.error("Failed deleting public tab:", err)
         setError(
@@ -850,31 +1236,17 @@ export default function ChordTransposer() {
         setDeletingTabId(null)
       }
     },
-    [deletePassword, previewPublicTab]
+    [deletePassword, previewPublicTab, showNotice]
   )
-
-  // --- LIBRARY DISABLED ---
-  /*
-  const addFromLibrary = useCallback(async (saved: SavedSong) => {
-    try {
-      await addSong(saved.uri)
-    } catch (err) {
-      console.error("Failed to add from library:", err)
-      setError("Failed to add song from library")
-    }
-  }, [addSong])
-  */
-
-  useEffect(() => {
-    if (currentUri && currentUri.includes("ultimate-guitar.com")) {
-      setError(null)
-    }
-  }, [currentUri])
 
   useEffect(() => {
     loadPublicTabs()
   }, [loadPublicTabs])
 
+  // ---------- Editing songs in the setlist ----------
+
+  // Edits are made on the transposed text, so the transposition is baked in
+  // and the step resets to 0 (otherwise the song would be transposed twice).
   useEffect(() => {
     if (!editingSongId || !parsedPastedSong) return
 
@@ -887,6 +1259,7 @@ export default function ChordTransposer() {
               song: parsedPastedSong.song,
               chords: parsedPastedSong.chords,
               transposedChords: parsedPastedSong.chords,
+              transposeStep: 0,
             }
           : song
       )
@@ -896,9 +1269,10 @@ export default function ChordTransposer() {
   const startEditingSong = useCallback((song: SongData) => {
     setEditingSongId(song.id)
     setPastedTabText(songToEditableTabText(song))
+    setIsPasteOpen(true)
     setError(null)
-    setWorkspaceTab("editor")
-    setActiveTab("pdf")
+    setView("editor")
+    window.scrollTo({ top: 0, behavior: "smooth" })
   }, [])
 
   const cancelEditingSong = useCallback(() => {
@@ -917,27 +1291,21 @@ export default function ChordTransposer() {
     [editingSongId]
   )
 
-  const moveSongUp = useCallback((index: number) => {
-    if (index === 0) return
+  const moveSong = useCallback((index: number, direction: -1 | 1) => {
     setSongs(prev => {
-      const newSongs = [...prev]
-      ;[newSongs[index - 1], newSongs[index]] = [newSongs[index], newSongs[index - 1]]
-      return newSongs
-    })
-  }, [])
-
-  const moveSongDown = useCallback((index: number) => {
-    setSongs(prev => {
-      if (index === prev.length - 1) return prev
-      const newSongs = [...prev]
-      ;[newSongs[index], newSongs[index + 1]] = [newSongs[index + 1], newSongs[index]]
-      return newSongs
+      const target = index + direction
+      if (target < 0 || target >= prev.length) return prev
+      const next = [...prev]
+      ;[next[index], next[target]] = [next[target], next[index]]
+      return next
     })
   }, [])
 
   const updateTranspose = useCallback((id: string, step: number) => {
     setSongs(prev =>
-      prev.map(s => (s.id === id ? { ...s, transposeStep: step } : s))
+      prev.map(s =>
+        s.id === id ? { ...s, transposeStep: Math.max(-12, Math.min(12, step)) } : s
+      )
     )
   }, [])
 
@@ -950,13 +1318,14 @@ export default function ChordTransposer() {
         !e.metaKey &&
         !e.altKey &&
         pdfUrl &&
-        activeTab === "pdf"
+        view === "editor"
       ) {
         const activeElement = document.activeElement
         if (
           activeElement &&
           (activeElement.tagName === "INPUT" ||
-            activeElement.tagName === "TEXTAREA")
+            activeElement.tagName === "TEXTAREA" ||
+            activeElement.tagName === "SELECT")
         )
           return
 
@@ -967,7 +1336,7 @@ export default function ChordTransposer() {
 
     document.addEventListener("keydown", handleKeyDown)
     return () => document.removeEventListener("keydown", handleKeyDown)
-  }, [pdfUrl, activeTab])
+  }, [pdfUrl, view])
 
   // Transpose effect
   const transposeDeps = songs
@@ -1060,15 +1429,18 @@ export default function ChordTransposer() {
     updatePDF()
   }, [previewSongs, fontSize, autoLinebreak, currentExportSettings])
 
+  const exportBaseName =
+    setlistName.trim() ||
+    (songs.length === 1
+      ? `${songs[0].artist} - ${songs[0].song}`
+      : `Setlist - ${pluralize(songs.length, "song")}`)
+
   const handleDownloadPDF = () => {
     if (!pdfUrl) return
 
     const a = document.createElement("a")
     a.href = pdfUrl
-    a.download =
-      songs.length === 1
-        ? `${songs[0].artist} - ${songs[0].song}.pdf`
-        : `Setlist - ${songs.length} songs.pdf`
+    a.download = `${exportBaseName}.pdf`
 
     document.body.appendChild(a)
     a.click()
@@ -1100,7 +1472,6 @@ export default function ChordTransposer() {
       setTimeout(() => setCopySuccess(false), 2000)
     } catch {
       setError("Failed to copy to clipboard")
-      setTimeout(() => setError(null), 3000)
     }
   }
 
@@ -1118,10 +1489,7 @@ export default function ChordTransposer() {
 
       const a = document.createElement("a")
       a.href = url
-      a.download =
-        songs.length === 1
-          ? `${songs[0].artist} - ${songs[0].song}.docx`
-          : `Setlist - ${songs.length} songs.docx`
+      a.download = `${exportBaseName}.docx`
 
       document.body.appendChild(a)
       a.click()
@@ -1129,579 +1497,578 @@ export default function ChordTransposer() {
       URL.revokeObjectURL(url)
     } catch {
       setError("Failed to generate Word document")
-      setTimeout(() => setError(null), 3000)
     }
   }
 
+  const navItems: Array<{ value: WorkspaceView; label: string; count?: number }> = [
+    { value: "editor", label: "Editor", count: songs.length || undefined },
+    { value: "saved", label: "My Setlists", count: savedSetlists.length || undefined },
+    { value: "published", label: "Public Tabs" },
+  ]
+
+  const setlistStatus = activeSavedSetlist
+    ? hasUnsavedChanges
+      ? "Unsaved changes"
+      : `Saved ${formatRelativeTime(activeSavedSetlist.updatedAt)}`
+    : songs.length > 0
+    ? "Not saved yet"
+    : null
+
   return (
-    <div className="flex flex-col min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
-      <header className="sticky top-0 z-10 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 shadow-sm">
-        <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <Music2 className="h-6 w-6 text-primary" />
-              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
-                tabs
-              </h1>
-              {songs.length > 0 && (
-                <span className="text-sm text-slate-500 dark:text-slate-400">
-                  ({songs.length} {songs.length === 1 ? "song" : "songs"})
-                </span>
-              )}
-            </div>
-            <div className="flex items-center space-x-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleDownloadPDF}
-                disabled={!pdfUrl}
-                className="hidden sm:flex"
+    <div className="flex min-h-screen flex-col bg-slate-100 text-slate-900">
+      <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3 sm:px-6 lg:px-8">
+          <div className="flex items-center gap-2">
+            <Music2 className="h-6 w-6 text-primary" />
+            <span className="text-xl font-bold tracking-tight">tabs</span>
+          </div>
+
+          <nav className="order-3 flex w-full gap-1 rounded-lg bg-slate-100 p-1 sm:order-none sm:w-auto">
+            {navItems.map(item => (
+              <button
+                key={item.value}
+                type="button"
+                onClick={() => setView(item.value)}
+                className={cn(
+                  "flex flex-1 items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors sm:flex-none",
+                  view === item.value
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
               >
-                <FileDown className="mr-2 h-4 w-4" />
-                PDF
-              </Button>
-            </div>
+                {item.label}
+                {item.count !== undefined && (
+                  <span
+                    className={cn(
+                      "rounded-full px-2 py-0.5 text-xs tabular-nums",
+                      view === item.value ? "bg-primary/10 text-primary" : "bg-slate-200 text-slate-600"
+                    )}
+                  >
+                    {item.count}
+                  </span>
+                )}
+              </button>
+            ))}
+          </nav>
+
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsFullScreen(true)}
+              disabled={!pdfUrl}
+              className="hidden md:inline-flex"
+              title="Fullscreen with autoscroll (F)"
+            >
+              <Maximize className="mr-2 h-4 w-4" />
+              Fullscreen
+            </Button>
+            <Button size="sm" onClick={handleDownloadPDF} disabled={!pdfUrl}>
+              <FileDown className="mr-2 h-4 w-4" />
+              Download PDF
+            </Button>
           </div>
         </div>
       </header>
 
       <main className="flex-grow">
-        <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-          <Tabs
-            value={workspaceTab}
-            onValueChange={setWorkspaceTab}
-            className="mb-6"
-          >
-            <TabsList className="grid w-full max-w-[320px] grid-cols-2">
-              <TabsTrigger value="editor">Editor</TabsTrigger>
-              <TabsTrigger value="published">Published Tabs</TabsTrigger>
-            </TabsList>
-          </Tabs>
+        <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:px-8">
+          {(error || notice) && (
+            <div
+              role={error ? "alert" : "status"}
+              className={cn(
+                "mb-6 flex items-start gap-3 rounded-lg border px-4 py-3 text-sm",
+                error
+                  ? "border-red-200 bg-red-50 text-red-800"
+                  : "border-emerald-200 bg-emerald-50 text-emerald-800"
+              )}
+            >
+              {error ? (
+                <AlertCircle className="mt-0.5 h-5 w-5 flex-shrink-0" />
+              ) : (
+                <CheckCircle2 className="mt-0.5 h-5 w-5 flex-shrink-0" />
+              )}
+              <span className="flex-1 leading-relaxed">{error || notice}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null)
+                  setNotice(null)
+                }}
+                className="rounded p-0.5 opacity-70 hover:opacity-100"
+                aria-label="Dismiss"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
 
-          {workspaceTab === "editor" && (
-            <Card className="mb-6 border border-slate-200 dark:border-slate-800 shadow-md">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-xl flex items-center">
-                <Plus className="mr-2 h-5 w-5 text-primary" />
-                Add Song to Setlist
-              </CardTitle>
-              <CardDescription>
-                Add by Ultimate Guitar link or paste tab text from your personal editor
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-col sm:flex-row gap-3">
-                <div className="flex-grow">
-                  <Input
-                    value={currentUri}
-                    onChange={e => setCurrentUri(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === "Enter" && currentUri && !isLoading) {
-                        e.preventDefault()
-                        addSong()
-                      }
-                    }}
-                    placeholder="https://tabs.ultimate-guitar.com/tab/..."
-                    className="w-full"
+          {view === "editor" && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+              <div className="space-y-6 lg:col-span-5">
+                <Card className="shadow-sm">
+                  <SectionHeading
+                    icon={<Plus className="h-5 w-5" />}
+                    title="Add songs"
+                    description="Paste one or more Ultimate Guitar links (one per line), or paste tab text."
                   />
-                </div>
-                <Button
-                  onClick={() => addSong()}
-                  disabled={isLoading || !currentUri}
-                  className="min-w-[120px]"
-                >
-                  {isLoading ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Loading
-                    </>
-                  ) : (
-                    <>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Add Song
-                    </>
-                  )}
-                </Button>
-              </div>
-
-              <Separator className="my-4" />
-
-              <div className="space-y-3">
-                <div className="space-y-1">
-                  <Label htmlFor="pasted-tab-text">Paste tab text</Label>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Supports `Title`, `Artist`, `Key`, `Capo`, plus chord/lyric blocks.
-                  </p>
-                </div>
-                <textarea
-                  id="pasted-tab-text"
-                  value={pastedTabText}
-                  onChange={e => setPastedTabText(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                      e.preventDefault()
-                      addOrConfirmPastedSong()
-                    }
-                  }}
-                  placeholder={
-                    "Title: Song Name\nArtist: Artist Name\nKey: G\nCapo: 4\n\n[Verse 1]\nD      G\nLyrics..."
-                  }
-                  className="w-full min-h-[220px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                  style={{ fontFamily: getBrowserFontStack(monoFont) }}
-                />
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs text-slate-500 dark:text-slate-400">
-                    {editingSongId
-                      ? "Live preview updates while editing. Press Confirm Edit when finished."
-                      : "Live preview includes this draft. Press Add Song to save it to your setlist."}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {editingSongId && (
-                      <Button onClick={cancelEditingSong} variant="outline">
-                        Cancel Edit
-                      </Button>
-                    )}
-                    <Button
-                      onClick={addOrConfirmPastedSong}
-                      disabled={!pastedTabText.trim() || Boolean(pastedTabError)}
-                      variant="secondary"
-                    >
-                      <Plus className="mr-2 h-4 w-4" />
-                      {editingSongId ? "Confirm Edit" : "Add Song"}
-                    </Button>
-                  </div>
-                </div>
-
-                {pastedTabError && (
-                  <p className="text-xs text-red-600 dark:text-red-400">{pastedTabError}</p>
-                )}
-              </div>
-
-              {error && (
-                <div className="mt-3 p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-md flex items-start">
-                  <AlertCircle className="h-5 w-5 mr-2 flex-shrink-0 mt-0.5" />
-                  <span>{error}</span>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-          )}
-
-          {workspaceTab === "published" && (
-            <Card className="mb-6 border border-slate-200 dark:border-slate-800 shadow-md">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-lg flex items-center">
-                <Globe className="mr-2 h-5 w-5 text-primary" />
-                Public Tabs
-              </CardTitle>
-              <CardDescription>
-                Anyone can publish here. Get the delete password from Allen.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <Input
-                  value={publisherName}
-                  onChange={e => setPublisherName(e.target.value)}
-                  placeholder="Your name (optional)"
-                />
-                <Input
-                  value={publishTitle}
-                  onChange={e => setPublishTitle(e.target.value)}
-                  placeholder="Setlist title (optional)"
-                />
-                <Input
-                  type="password"
-                  value={deletePassword}
-                  onChange={e => setDeletePassword(e.target.value)}
-                  placeholder="Delete password"
-                />
-                <div className="flex gap-2 items-center">
-                  <Button
-                    onClick={publishCurrentSetlist}
-                    disabled={songs.length === 0 || isPublishing}
-                    className="flex-1"
-                  >
-                    {isPublishing ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Publishing
-                      </>
-                    ) : (
-                      <>
-                        <Upload className="mr-2 h-4 w-4" />
-                        Publish
-                      </>
-                    )}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={loadPublicTabs}
-                    disabled={isPublicTabsLoading}
-                    className="px-3"
-                    title="Refresh public tabs"
-                  >
-                    <RefreshCw
-                      className={`h-4 w-4 ${isPublicTabsLoading ? "animate-spin" : ""}`}
-                    />
-                  </Button>
-                </div>
-              </div>
-
-              <Input
-                value={publicTabsSearch}
-                onChange={e => setPublicTabsSearch(e.target.value)}
-                placeholder="Search by song, artist, setlist, or publisher"
-                className="mt-3"
-              />
-
-              {publishMessage && (
-                <div className="mt-3 p-2 rounded-md bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400 text-sm">
-                  {publishMessage}
-                </div>
-              )}
-
-              <div className="mt-4 space-y-2 max-h-[320px] overflow-y-auto pr-1">
-                {isPublicTabsLoading && publicTabs.length === 0 ? (
-                  <div className="text-sm text-slate-500 dark:text-slate-400 flex items-center">
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Loading public tabs...
-                  </div>
-                ) : publicTabs.length === 0 ? (
-                  <p className="text-sm text-slate-500 dark:text-slate-400">
-                    No public tabs yet. Publish your current setlist to start.
-                  </p>
-                ) : filteredPublicTabs.length === 0 ? (
-                  <p className="text-sm text-slate-500 dark:text-slate-400">
-                    No matching tabs found.
-                  </p>
-                ) : (
-	                  filteredPublicTabs.map(publicTab => (
-	                    <div
-	                      key={publicTab.id}
-	                      className="p-3 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/40 flex items-center justify-between gap-3"
-	                    >
-	                      <button
-	                        type="button"
-	                        onClick={() => openPublicTabPreview(publicTab)}
-	                        className="min-w-0 text-left flex-1"
-	                      >
-	                        <div className="font-semibold text-sm truncate">
-	                          {publicTab.setlistTitle}
-	                        </div>
-	                        <div className="text-xs text-slate-500 dark:text-slate-400">
-	                          {publicTab.publisherName} • {publicTab.songs.length}{" "}
-	                          {publicTab.songs.length === 1 ? "song" : "songs"} •{" "}
-	                          {new Date(publicTab.publishedAt).toLocaleString()}
-	                        </div>
-	                      </button>
-	                      <div className="flex items-center gap-2">
-	                        <Button
-	                          variant="outline"
-	                          size="sm"
-	                          onClick={() => openPublicTabPreview(publicTab)}
-	                        >
-	                          <Eye className="mr-1 h-3.5 w-3.5" />
-	                          Preview
-	                        </Button>
-	                        <Button
-	                          variant="outline"
-	                          size="sm"
-	                          onClick={() => addPublicTabToSetlist(publicTab)}
-	                        >
-	                          Add to Setlist
-	                        </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => deletePublicTab(publicTab)}
-                            disabled={
-                              deletingTabId === publicTab.id ||
-                              !deletePassword.trim()
-                            }
-                            className="text-red-600 hover:text-red-700"
-                            title={
-                              deletePassword.trim()
-                                ? "Delete tab"
-                                : "Enter delete password first"
-                            }
-                          >
-                            {deletingTabId === publicTab.id ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Trash2 className="h-3.5 w-3.5" />
-                            )}
-                          </Button>
-	                      </div>
-	                    </div>
-	                  ))
-	                )}
-	              </div>
-            </CardContent>
-          </Card>
-          )}
-
-          {workspaceTab === "editor" && songs.length > 0 && (
-            <Card className="mb-6 border border-slate-200 dark:border-slate-800 shadow-md">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-lg flex items-center">
-                  <List className="mr-2 h-5 w-5 text-primary" />
-                  Setlist ({songs.length} {songs.length === 1 ? "song" : "songs"})
-                </CardTitle>
-                <CardDescription>
-                  Reorder, transpose, or remove songs from your setlist
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-2">
-                  {songs.map((songData, index) => (
-                    <div
-                      key={songData.id}
-                      className="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg border border-slate-200 dark:border-slate-700"
-                    >
-                      <div className="flex flex-col gap-1">
+                  <CardContent className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="song-links" className="flex items-center gap-2 text-sm font-medium">
+                        <LinkIcon className="h-4 w-4 text-slate-500" />
+                        Ultimate Guitar links
+                      </Label>
+                      <textarea
+                        id="song-links"
+                        value={linkInput}
+                        onChange={e => setLinkInput(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter" && !e.shiftKey && pendingLinks.length <= 1) {
+                            e.preventDefault()
+                            if (!isLoadingLinks && linkInput.trim()) addSongsFromLinks()
+                          } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                            e.preventDefault()
+                            if (!isLoadingLinks) addSongsFromLinks()
+                          }
+                        }}
+                        disabled={isLoadingLinks}
+                        rows={pendingLinks.length > 1 ? Math.min(pendingLinks.length + 1, 8) : 2}
+                        placeholder={"https://tabs.ultimate-guitar.com/tab/...\nPaste several links to add a whole setlist"}
+                        className="w-full resize-y rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
+                      />
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-slate-500">
+                          {isLoadingLinks && loadingProgress
+                            ? `Loading ${Math.min(loadingProgress.done + 1, loadingProgress.total)} of ${loadingProgress.total}…`
+                            : pendingLinks.length > 1
+                            ? `${pendingLinks.length} links ready`
+                            : "Enter to add · Shift+Enter for a new line"}
+                        </span>
                         <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => moveSongUp(index)}
-                          disabled={index === 0}
-                          className="h-6 w-6"
+                          onClick={addSongsFromLinks}
+                          disabled={isLoadingLinks || pendingLinks.length === 0}
+                          className="min-w-[132px]"
                         >
+                          {isLoadingLinks ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              Loading
+                            </>
+                          ) : (
+                            <>
+                              <Plus className="mr-2 h-4 w-4" />
+                              {pendingLinks.length > 1 ? `Add ${pendingLinks.length} songs` : "Add song"}
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <Separator />
+
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setIsPasteOpen(prev => !prev)}
+                        className="flex w-full items-center justify-between rounded-md py-1 text-left text-sm font-medium text-slate-700 hover:text-slate-900"
+                        aria-expanded={isPasteOpen || Boolean(editingSongId)}
+                      >
+                        <span className="flex items-center gap-2">
+                          <ClipboardPaste className="h-4 w-4 text-slate-500" />
+                          {editingSongId ? "Editing song text" : "Paste tab text instead"}
+                        </span>
+                        {isPasteOpen || editingSongId ? (
                           <ChevronUp className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => moveSongDown(index)}
-                          disabled={index === songs.length - 1}
-                          className="h-6 w-6"
-                        >
+                        ) : (
                           <ChevronDown className="h-4 w-4" />
-                        </Button>
-                      </div>
-
-                      <div className="flex-grow min-w-0">
-                        <div className="font-semibold text-sm truncate">
-                          {songData.song}
-                        </div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                          {songData.artist}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <div className="text-xs text-slate-500 dark:text-slate-400">
-                          Transpose:
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          onClick={() =>
-                            updateTranspose(
-                              songData.id,
-                              Math.max(songData.transposeStep - 1, -12)
-                            )
-                          }
-                          disabled={songData.transposeStep <= -12}
-                          className="h-7 w-7"
-                        >
-                          <ChevronDown className="h-3 w-3" />
-                        </Button>
-                        <div className="w-12 text-center font-mono text-sm font-bold text-primary">
-                          {songData.transposeStep > 0
-                            ? `+${songData.transposeStep}`
-                            : songData.transposeStep}
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="icon"
-                          onClick={() =>
-                            updateTranspose(
-                              songData.id,
-                              Math.min(songData.transposeStep + 1, 12)
-                            )
-                          }
-                          disabled={songData.transposeStep >= 12}
-                          className="h-7 w-7"
-                        >
-                          <ChevronUp className="h-3 w-3" />
-                        </Button>
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => openPublishSongDialog(songData)}
-                          className="h-8"
-                        >
-                          <Upload className="mr-1 h-3.5 w-3.5" />
-                          Publish
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => startEditingSong(songData)}
-                          className="h-8"
-                        >
-                          <Edit3 className="mr-1 h-3.5 w-3.5" />
-                          Edit
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removeSong(songData.id)}
-                          className="h-8 w-8 text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {workspaceTab === "editor" && previewSongs.length > 0 && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <Card className="lg:col-span-2 border border-slate-200 dark:border-slate-800 shadow-md">
-                <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                  <CardHeader className="pb-0">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-xl flex items-center">
-                        <Music className="mr-2 h-5 w-5 text-primary" />
-                        Transposed Chords
-                      </CardTitle>
-                      <div className="flex items-center gap-3">
-                        <TabsList className="grid grid-cols-2 w-[200px]">
-                          <TabsTrigger value="preview">Preview</TabsTrigger>
-                          <TabsTrigger value="pdf">PDF</TabsTrigger>
-                        </TabsList>
-                        {pdfUrl && activeTab === "pdf" && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setIsFullScreen(true)}
-                            className="hidden sm:flex items-center gap-1 text-xs"
-                            title="Open fullscreen with autoscroll (F)"
-                          >
-                            <Maximize className="h-3 w-3" />
-                            Fullscreen
-                          </Button>
                         )}
-                      </div>
-                    </div>
-                  </CardHeader>
+                      </button>
 
-                  <CardContent className="pt-6">
-                    <TabsContent value="preview" className="mt-0">{/* disabled */}</TabsContent>
-
-                    <TabsContent value="pdf" className="mt-0">
-                      {pdfUrl ? (
-                        <div className="relative group">
-                          <iframe
-                            src={pdfUrl}
-                            className="w-full h-[70vh] border border-slate-200 dark:border-slate-800 rounded-md"
-                            title="PDF Preview"
+                      {(isPasteOpen || editingSongId) && (
+                        <div className="mt-3 space-y-3">
+                          <p className="text-sm text-slate-500">
+                            Start with optional <code className="rounded bg-slate-100 px-1">Title:</code>,{" "}
+                            <code className="rounded bg-slate-100 px-1">Artist:</code>,{" "}
+                            <code className="rounded bg-slate-100 px-1">Key:</code>,{" "}
+                            <code className="rounded bg-slate-100 px-1">Capo:</code> lines, then chords and lyrics.
+                          </p>
+                          <textarea
+                            id="pasted-tab-text"
+                            value={pastedTabText}
+                            onChange={e => setPastedTabText(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                                e.preventDefault()
+                                addOrConfirmPastedSong()
+                              }
+                            }}
+                            placeholder={
+                              "Title: Song Name\nArtist: Artist Name\nKey: G\nCapo: 4\n\n[Verse 1]\nD      G\nLyrics..."
+                            }
+                            className="min-h-[280px] w-full rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                            style={{ fontFamily: getBrowserFontStack(monoFont) }}
                           />
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => setIsFullScreen(true)}
-                            className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 shadow-lg backdrop-blur-sm bg-white/90 dark:bg-slate-800/90 hover:bg-white dark:hover:bg-slate-800"
-                            title="Open in fullscreen with autoscroll (F)"
-                          >
-                            <Maximize className="h-4 w-4 mr-1" />
-                            Fullscreen
-                          </Button>
-                        </div>
-                      ) : (
-                        <div className="w-full h-[70vh] flex items-center justify-center text-slate-500 border border-slate-200 dark:border-slate-800 rounded-md">
-                          <Loader2 className="h-8 w-8 animate-spin mr-2" />
-                          Generating PDF preview...
+                          {pastedTabError && (
+                            <p className="text-sm text-red-600">{pastedTabError}</p>
+                          )}
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <span className="text-sm text-slate-500">
+                              {editingSongId
+                                ? "Preview updates as you type."
+                                : "The draft shows in the preview until you add it."}
+                            </span>
+                            <div className="flex items-center gap-2">
+                              {editingSongId && (
+                                <Button onClick={cancelEditingSong} variant="outline">
+                                  Cancel
+                                </Button>
+                              )}
+                              <Button
+                                onClick={addOrConfirmPastedSong}
+                                disabled={!pastedTabText.trim() || Boolean(pastedTabError)}
+                                variant={editingSongId ? "default" : "secondary"}
+                              >
+                                {editingSongId ? (
+                                  <>
+                                    <Check className="mr-2 h-4 w-4" />
+                                    Done editing
+                                  </>
+                                ) : (
+                                  <>
+                                    <Plus className="mr-2 h-4 w-4" />
+                                    Add song
+                                  </>
+                                )}
+                              </Button>
+                            </div>
+                          </div>
                         </div>
                       )}
-                    </TabsContent>
-                  </CardContent>
-                </Tabs>
-              </Card>
-
-              <div className="flex flex-col gap-6">
-                <Card className="order-2 border border-slate-200 dark:border-slate-800 shadow-md">
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-lg flex items-center">
-                      <FileText className="mr-2 h-5 w-5 text-primary" />
-                      PDF Settings
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-6">
-                      <div className="space-y-2">
-                        <div className="flex justify-between">
-                          <Label htmlFor="font-size-slider">Font Size: {fontSize}pt</Label>
-                          <span className="text-sm text-slate-500 dark:text-slate-400">
-                            {fontSize < 9
-                              ? "Small"
-                              : fontSize > 12
-                              ? "Large"
-                              : "Medium"}
-                          </span>
-                        </div>
-                        <Slider
-                          id="font-size-slider"
-                          min={6}
-                          max={20}
-                          step={0.5}
-                          value={[fontSize]}
-                          onValueChange={value => setFontSize(value[0])}
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="mono-font-select">Monospace Font</Label>
-                        <select
-                          id="mono-font-select"
-                          value={monoFont}
-                          onChange={e => setMonoFont(e.target.value as MonoFontOption)}
-                          className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                          style={{ fontFamily: getBrowserFontStack(monoFont) }}
-                        >
-                          {monoFontOptions.map(fontOption => (
-                            <option key={fontOption.value} value={fontOption.value}>
-                              {fontOption.label} ({fontOption.exportHint})
-                            </option>
-                          ))}
-                        </select>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          PDF supports Roboto Mono and Courier-family rendering.
-                        </p>
-                      </div>
-
-                      <div className="text-xs text-slate-500 dark:text-slate-400 space-y-1">
-                        <p>Inline styling now uses markdown:</p>
-                        <p>
-                          Use <code>*bold*</code> for bold and <code>_underline_</code>{" "}
-                          for underline.
-                        </p>
-                      </div>
                     </div>
                   </CardContent>
                 </Card>
 
-                <Card className="order-1 border border-slate-200 dark:border-slate-800 shadow-md">
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-lg flex items-center">
-                        <FileText className="mr-2 h-5 w-5 text-primary" />
-                        Note Boxes
-                      </CardTitle>
+                <Card className="shadow-sm">
+                  <CardHeader className="space-y-3 pb-4">
+                    <div className="flex items-center gap-2">
+                      <List className="h-5 w-5 flex-shrink-0 text-primary" />
+                      <Input
+                        value={setlistName}
+                        onChange={e => setSetlistName(e.target.value)}
+                        placeholder="Untitled setlist"
+                        aria-label="Setlist name"
+                        className="h-10 border-transparent bg-transparent px-2 text-lg font-semibold shadow-none hover:border-input focus-visible:border-input"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button size="sm" onClick={() => saveSetlist()} disabled={songs.length === 0}>
+                        <Save className="mr-2 h-4 w-4" />
+                        {activeSavedSetlist ? "Save" : "Save setlist"}
+                      </Button>
+                      {activeSavedSetlist && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => saveSetlist(true)}
+                          disabled={songs.length === 0}
+                        >
+                          Save as new
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={startNewSetlist}
+                        disabled={songs.length === 0 && !setlistName}
+                      >
+                        <FilePlus2 className="mr-2 h-4 w-4" />
+                        New
+                      </Button>
+                      {setlistStatus && (
+                        <span
+                          className={cn(
+                            "ml-auto text-sm",
+                            hasUnsavedChanges ? "text-amber-700" : "text-slate-500"
+                          )}
+                        >
+                          {setlistStatus}
+                        </span>
+                      )}
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    {songs.length === 0 ? (
+                      <div className="rounded-lg border-2 border-dashed border-slate-200 px-6 py-10 text-center">
+                        <Music2 className="mx-auto h-10 w-10 text-slate-300" />
+                        <p className="mt-3 font-medium text-slate-700">No songs yet</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          Add songs above, or open one of{" "}
+                          <button
+                            type="button"
+                            onClick={() => setView("saved")}
+                            className="font-medium text-primary hover:underline"
+                          >
+                            your saved setlists
+                          </button>
+                          .
+                        </p>
+                      </div>
+                    ) : (
+                      <ol className="space-y-2">
+                        {songs.map((songData, index) => (
+                          <li
+                            key={songData.id}
+                            className={cn(
+                              "rounded-lg border bg-white p-3 transition-colors",
+                              editingSongId === songData.id
+                                ? "border-primary ring-1 ring-primary"
+                                : "border-slate-200 hover:border-slate-300"
+                            )}
+                          >
+                            <div className="flex items-start gap-3">
+                              <span className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 text-sm font-semibold tabular-nums text-slate-600">
+                                {index + 1}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-base font-semibold leading-tight text-slate-900">
+                                  {songData.song}
+                                </div>
+                                <div className="truncate text-sm text-slate-500">
+                                  {songData.artist}
+                                </div>
+                              </div>
+                              <div className="flex flex-shrink-0 items-center">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => moveSong(index, -1)}
+                                  disabled={index === 0}
+                                  className="h-8 w-8"
+                                  title="Move up"
+                                >
+                                  <ChevronUp className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => moveSong(index, 1)}
+                                  disabled={index === songs.length - 1}
+                                  className="h-8 w-8"
+                                  title="Move down"
+                                >
+                                  <ChevronDown className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div className="mt-3 flex flex-wrap items-center gap-2 pl-10">
+                              <div className="flex items-center rounded-md border border-slate-200">
+                                <button
+                                  type="button"
+                                  onClick={() => updateTranspose(songData.id, songData.transposeStep - 1)}
+                                  disabled={songData.transposeStep <= -12}
+                                  className="flex h-8 w-8 items-center justify-center text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                  title="Transpose down a half step"
+                                >
+                                  <Minus className="h-3.5 w-3.5" />
+                                </button>
+                                <span
+                                  className={cn(
+                                    "w-20 text-center text-sm tabular-nums",
+                                    songData.transposeStep === 0
+                                      ? "text-slate-500"
+                                      : "font-semibold text-primary"
+                                  )}
+                                  title="Transpose (half steps)"
+                                >
+                                  {songData.transposeStep === 0
+                                    ? "Original"
+                                    : songData.transposeStep > 0
+                                    ? `+${songData.transposeStep}`
+                                    : songData.transposeStep}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => updateTranspose(songData.id, songData.transposeStep + 1)}
+                                  disabled={songData.transposeStep >= 12}
+                                  className="flex h-8 w-8 items-center justify-center text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                                  title="Transpose up a half step"
+                                >
+                                  <Plus className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+
+                              <div className="ml-auto flex items-center gap-1">
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => startEditingSong(songData)}
+                                  className="h-8 px-2.5 text-slate-600"
+                                >
+                                  <Edit3 className="mr-1.5 h-3.5 w-3.5" />
+                                  Edit
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => openPublishSongDialog(songData)}
+                                  className="h-8 px-2.5 text-slate-600"
+                                >
+                                  <Upload className="mr-1.5 h-3.5 w-3.5" />
+                                  Publish
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => removeSong(songData.id)}
+                                  className="h-8 w-8 text-red-500 hover:bg-red-50 hover:text-red-700"
+                                  title="Remove from setlist"
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="shadow-sm">
+                  <SectionHeading
+                    icon={<SlidersHorizontal className="h-5 w-5" />}
+                    title="Layout & export"
+                  />
+                  <CardContent className="space-y-5">
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <Label htmlFor="font-size-slider" className="text-sm font-medium">
+                          Font size
+                        </Label>
+                        <span className="text-sm tabular-nums text-slate-600">{fontSize}pt</span>
+                      </div>
+                      <Slider
+                        id="font-size-slider"
+                        min={6}
+                        max={20}
+                        step={0.5}
+                        value={[fontSize]}
+                        onValueChange={value => setFontSize(value[0])}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="mono-font-select" className="text-sm font-medium">
+                        Monospace font
+                      </Label>
+                      <select
+                        id="mono-font-select"
+                        value={monoFont}
+                        onChange={e => setMonoFont(e.target.value as MonoFontOption)}
+                        className="h-10 w-full rounded-md border border-input bg-white px-3 text-sm"
+                        style={{ fontFamily: getBrowserFontStack(monoFont) }}
+                      >
+                        {monoFontOptions.map(fontOption => (
+                          <option key={fontOption.value} value={fontOption.value}>
+                            {fontOption.label} ({fontOption.exportHint})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-start gap-3">
+                      <Checkbox
+                        id="auto-linebreak"
+                        checked={autoLinebreak}
+                        onCheckedChange={checked => setAutoLinebreak(checked === true)}
+                        className="mt-0.5"
+                      />
+                      <Label htmlFor="auto-linebreak" className="cursor-pointer text-sm font-medium">
+                        Keep sections together
+                        <span className="mt-0.5 block font-normal text-slate-500">
+                          Avoid splitting a paragraph across pages
+                        </span>
+                      </Label>
+                    </div>
+
+                    <p className="text-sm text-slate-500">
+                      Tip: use <code className="rounded bg-slate-100 px-1">*bold*</code> and{" "}
+                      <code className="rounded bg-slate-100 px-1">_underline_</code> in tab text and notes.
+                    </p>
+
+                    <Separator />
+
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <Button onClick={handleDownloadPDF} disabled={!pdfUrl}>
+                        <FileDown className="mr-2 h-4 w-4" />
+                        Download PDF
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => setIsAdvancedExportOpen(prev => !prev)}
+                        className="justify-between"
+                      >
+                        More export options
+                        {isAdvancedExportOpen ? (
+                          <ChevronUp className="ml-2 h-4 w-4" />
+                        ) : (
+                          <ChevronDown className="ml-2 h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
+
+                    {isAdvancedExportOpen && (
+                      <div className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <Button
+                          onClick={handleDownloadDocx}
+                          disabled={songs.length === 0}
+                          variant="outline"
+                          className="w-full bg-white"
+                        >
+                          <FileType className="mr-2 h-4 w-4" />
+                          Download Word doc (.docx)
+                        </Button>
+                        <p className="text-center text-sm text-slate-500">
+                          Upload to Google Docs to keep formatting
+                        </p>
+                        <Button
+                          onClick={handleCopyToClipboard}
+                          disabled={songs.length === 0}
+                          variant="outline"
+                          className="w-full bg-white"
+                        >
+                          {copySuccess ? (
+                            <>
+                              <Check className="mr-2 h-4 w-4" />
+                              Copied!
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="mr-2 h-4 w-4" />
+                              Copy as plain text
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="shadow-sm">
+                  <SectionHeading
+                    icon={<StickyNote className="h-5 w-5" />}
+                    title="Note boxes"
+                    description="Place text boxes on specific PDF pages."
+                    action={
                       <Button
                         type="button"
                         variant="ghost"
                         size="icon"
                         onClick={() => setIsNotesPanelOpen(prev => !prev)}
                         className="h-8 w-8"
+                        aria-expanded={isNotesPanelOpen}
+                        aria-label="Toggle note boxes"
                       >
                         {isNotesPanelOpen ? (
                           <ChevronUp className="h-4 w-4" />
@@ -1709,432 +2076,488 @@ export default function ChordTransposer() {
                           <ChevronDown className="h-4 w-4" />
                         )}
                       </Button>
-                    </div>
-                    <CardDescription>
-                      Keep PDF tab visible while positioning notes.
-                    </CardDescription>
-                  </CardHeader>
+                    }
+                  />
                   {isNotesPanelOpen && (
                     <CardContent>
-                      <div className="space-y-3">
+                      <fieldset
+                        disabled={!canEditNotes}
+                        className={cn("space-y-4", !canEditNotes && "opacity-60")}
+                      >
                         {!canEditNotes && (
-                          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/20 dark:text-amber-300">
-                            Open the PDF tab to edit notes while viewing the real layout.
-                            <div className="mt-2">
+                          <p className="text-sm text-slate-500">
+                            Add a song first — notes are positioned on the PDF.
+                          </p>
+                        )}
+
+                        <div className="flex items-center gap-2">
+                          <Label htmlFor="note-page" className="text-sm">
+                            Page
+                          </Label>
+                          <Input
+                            id="note-page"
+                            type="number"
+                            min={1}
+                            value={previewNotePage}
+                            onChange={e =>
+                              setPreviewNotePage(
+                                Math.max(1, Number.parseInt(e.target.value || "1", 10))
+                              )
+                            }
+                            className="h-9 w-20"
+                          />
+                          <Button type="button" variant="outline" size="sm" onClick={addNoteBox} className="ml-auto">
+                            <Plus className="mr-1.5 h-4 w-4" />
+                            Add note box
+                          </Button>
+                        </div>
+
+                        {noteBoxes.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            {noteBoxes.map((noteBox, noteIndex) => (
+                              <button
+                                key={noteBox.id}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedNoteId(prev => (prev === noteBox.id ? null : noteBox.id))
+                                  setPreviewNotePage(noteBox.page)
+                                }}
+                                className={cn(
+                                  "rounded-md border px-3 py-1.5 text-sm",
+                                  selectedNoteId === noteBox.id
+                                    ? "border-primary bg-primary/10 text-primary"
+                                    : "border-slate-200 bg-white hover:border-slate-300"
+                                )}
+                              >
+                                Note {noteIndex + 1} · p.{noteBox.page}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {selectedNoteBox && (
+                          <div className="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm font-semibold">Selected note</span>
                               <Button
                                 type="button"
                                 size="sm"
-                                variant="outline"
-                                onClick={() => setActiveTab("pdf")}
+                                variant="ghost"
+                                onClick={removeSelectedNoteBox}
+                                className="h-8 text-red-600 hover:text-red-700"
                               >
-                                Show PDF Tab
+                                <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                                Remove
                               </Button>
+                            </div>
+
+                            <textarea
+                              value={selectedNoteBox.text}
+                              onChange={e =>
+                                updateSelectedNoteBox(noteBox => ({
+                                  ...noteBox,
+                                  text: e.target.value,
+                                }))
+                              }
+                              placeholder="Note text — *bold* and _underline_ work here."
+                              className="min-h-[96px] w-full rounded-md border border-input bg-white px-3 py-2 text-sm placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                              style={{ fontFamily: getBrowserFontStack(monoFont) }}
+                            />
+
+                            <div className="flex items-center justify-between gap-2">
+                              <Label className="text-sm">Page</Label>
+                              <Input
+                                type="number"
+                                min={1}
+                                value={selectedNoteBox.page}
+                                onChange={e =>
+                                  updateSelectedNoteBox(noteBox => ({
+                                    ...noteBox,
+                                    page: Math.max(1, Number.parseInt(e.target.value || "1", 10)),
+                                  }))
+                                }
+                                className="h-8 w-20 text-right"
+                              />
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                              <NoteBoxField
+                                label="X position"
+                                value={selectedNoteBox.x}
+                                min={0}
+                                fallback={0.62}
+                                onChange={x => updateSelectedNoteBox(noteBox => ({ ...noteBox, x }))}
+                              />
+                              <NoteBoxField
+                                label="Y position"
+                                value={selectedNoteBox.y}
+                                min={0}
+                                fallback={0.08}
+                                onChange={y => updateSelectedNoteBox(noteBox => ({ ...noteBox, y }))}
+                              />
+                              <NoteBoxField
+                                label="Width"
+                                value={selectedNoteBox.width}
+                                min={MIN_NOTE_BOX_DIMENSION}
+                                fallback={0.24}
+                                onChange={width => updateSelectedNoteBox(noteBox => ({ ...noteBox, width }))}
+                              />
+                              <NoteBoxField
+                                label="Height"
+                                value={selectedNoteBox.height}
+                                min={MIN_NOTE_BOX_DIMENSION}
+                                fallback={0.18}
+                                onChange={height => updateSelectedNoteBox(noteBox => ({ ...noteBox, height }))}
+                              />
                             </div>
                           </div>
                         )}
-
-                        <fieldset disabled={!canEditNotes} className={canEditNotes ? "" : "opacity-60"}>
-                          <div className="space-y-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <Label>Per-Page Note Boxes</Label>
-                              <div className="flex items-center gap-2">
-                                <label className="text-xs text-slate-500 dark:text-slate-400">
-                                  Page
-                                </label>
-                                <Input
-                                  type="number"
-                                  min={1}
-                                  value={previewNotePage}
-                                  onChange={e =>
-                                    setPreviewNotePage(
-                                      Math.max(1, Number.parseInt(e.target.value || "1", 10))
-                                    )
-                                  }
-                                  className="h-8 w-20"
-                                />
-                              </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-2">
-                              <Button type="button" variant="outline" onClick={addNoteBox}>
-                                Add Note Box
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() => setSelectedNoteId(null)}
-                                disabled={!selectedNoteId}
-                              >
-                                Clear Selection
-                              </Button>
-                            </div>
-
-                            {noteBoxes.length > 0 && (
-                              <div className="space-y-2">
-                                <Label className="text-xs text-slate-500 dark:text-slate-400">
-                                  Select a note box to edit
-                                </Label>
-                                <div className="max-h-[140px] overflow-y-auto space-y-1 pr-1">
-                                  {noteBoxes.map((noteBox, noteIndex) => (
-                                    <button
-                                      key={noteBox.id}
-                                      type="button"
-                                      onClick={() => {
-                                        setSelectedNoteId(noteBox.id)
-                                        setPreviewNotePage(noteBox.page)
-                                      }}
-                                      className={`w-full rounded-md border px-2 py-1.5 text-left text-xs ${
-                                        selectedNoteId === noteBox.id
-                                          ? "border-primary bg-primary/10 text-primary"
-                                          : "border-slate-200 dark:border-slate-700"
-                                      }`}
-                                    >
-                                      Note {noteIndex + 1} • Page {noteBox.page}
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                            )}
-
-                            {selectedNoteBox && (
-                              <div className="space-y-2 rounded-md border border-slate-200 dark:border-slate-700 p-3">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-xs font-medium">Selected Note Box</span>
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="ghost"
-                                    onClick={removeSelectedNoteBox}
-                                    className="text-red-600 hover:text-red-700"
-                                  >
-                                    Remove
-                                  </Button>
-                                </div>
-
-                                <div className="space-y-3">
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                                      <Label className="text-xs">Page</Label>
-                                      <span>{selectedNoteBox.page}</span>
-                                    </div>
-                                    <Input
-                                      type="number"
-                                      min={1}
-                                      value={selectedNoteBox.page}
-                                      onChange={e =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          page: Math.max(
-                                            1,
-                                            Number.parseInt(e.target.value || "1", 10)
-                                          ),
-                                        }))
-                                      }
-                                      className="h-8"
-                                    />
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                                      <Label className="text-xs">X Position</Label>
-                                      <span>{selectedNoteBox.x.toFixed(2)}</span>
-                                    </div>
-                                    <Input
-                                      type="number"
-                                      step={0.01}
-                                      min={0}
-                                      max={1}
-                                      value={selectedNoteBox.x}
-                                      onChange={e =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          x: Math.max(
-                                            0,
-                                            Math.min(
-                                              1,
-                                              Number.parseFloat(e.target.value || "0.62")
-                                            )
-                                          ),
-                                        }))
-                                      }
-                                      className="h-8"
-                                    />
-                                    <Slider
-                                      min={0}
-                                      max={1}
-                                      step={0.01}
-                                      value={[selectedNoteBox.x]}
-                                      onValueChange={value =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          x: Math.max(0, Math.min(1, value[0] || 0)),
-                                        }))
-                                      }
-                                    />
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                                      <Label className="text-xs">Y Position</Label>
-                                      <span>{selectedNoteBox.y.toFixed(2)}</span>
-                                    </div>
-                                    <Input
-                                      type="number"
-                                      step={0.01}
-                                      min={0}
-                                      max={1}
-                                      value={selectedNoteBox.y}
-                                      onChange={e =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          y: Math.max(
-                                            0,
-                                            Math.min(
-                                              1,
-                                              Number.parseFloat(e.target.value || "0.08")
-                                            )
-                                          ),
-                                        }))
-                                      }
-                                      className="h-8"
-                                    />
-                                    <Slider
-                                      min={0}
-                                      max={1}
-                                      step={0.01}
-                                      value={[selectedNoteBox.y]}
-                                      onValueChange={value =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          y: Math.max(0, Math.min(1, value[0] || 0)),
-                                        }))
-                                      }
-                                    />
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                                      <Label className="text-xs">Width</Label>
-                                      <span>{selectedNoteBox.width.toFixed(2)}</span>
-                                    </div>
-                                    <Input
-                                      type="number"
-                                      step={0.01}
-                                      min={MIN_NOTE_BOX_DIMENSION}
-                                      max={1}
-                                      value={selectedNoteBox.width}
-                                      onChange={e =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          width: Math.max(
-                                            MIN_NOTE_BOX_DIMENSION,
-                                            Math.min(
-                                              1,
-                                              Number.parseFloat(e.target.value || "0.24")
-                                            )
-                                          ),
-                                        }))
-                                      }
-                                      className="h-8"
-                                    />
-                                    <Slider
-                                      min={MIN_NOTE_BOX_DIMENSION}
-                                      max={1}
-                                      step={0.01}
-                                      value={[selectedNoteBox.width]}
-                                      onValueChange={value =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          width: Math.max(
-                                            MIN_NOTE_BOX_DIMENSION,
-                                            Math.min(1, value[0] || MIN_NOTE_BOX_DIMENSION)
-                                          ),
-                                        }))
-                                      }
-                                    />
-                                  </div>
-
-                                  <div className="space-y-1">
-                                    <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
-                                      <Label className="text-xs">Height</Label>
-                                      <span>{selectedNoteBox.height.toFixed(2)}</span>
-                                    </div>
-                                    <Input
-                                      type="number"
-                                      step={0.01}
-                                      min={MIN_NOTE_BOX_DIMENSION}
-                                      max={1}
-                                      value={selectedNoteBox.height}
-                                      onChange={e =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          height: Math.max(
-                                            MIN_NOTE_BOX_DIMENSION,
-                                            Math.min(
-                                              1,
-                                              Number.parseFloat(e.target.value || "0.18")
-                                            )
-                                          ),
-                                        }))
-                                      }
-                                      className="h-8"
-                                    />
-                                    <Slider
-                                      min={MIN_NOTE_BOX_DIMENSION}
-                                      max={1}
-                                      step={0.01}
-                                      value={[selectedNoteBox.height]}
-                                      onValueChange={value =>
-                                        updateSelectedNoteBox(noteBox => ({
-                                          ...noteBox,
-                                          height: Math.max(
-                                            MIN_NOTE_BOX_DIMENSION,
-                                            Math.min(1, value[0] || MIN_NOTE_BOX_DIMENSION)
-                                          ),
-                                        }))
-                                      }
-                                    />
-                                  </div>
-                                </div>
-
-                                <textarea
-                                  value={selectedNoteBox.text}
-                                  onChange={e =>
-                                    updateSelectedNoteBox(noteBox => ({
-                                      ...noteBox,
-                                      text: e.target.value,
-                                    }))
-                                  }
-                                  placeholder="Use *bold* and _underline_ markdown here."
-                                  className="w-full min-h-[96px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                                  style={{ fontFamily: getBrowserFontStack(monoFont) }}
-                                />
-                              </div>
-                            )}
-                          </div>
-                        </fieldset>
-
-                        <p className="text-xs text-slate-500 dark:text-slate-400">
-                          Note preview overlay is disabled to avoid browser PDF alignment
-                          mismatch. Use the numeric + slider controls to position boxes.
-                        </p>
-                      </div>
+                      </fieldset>
                     </CardContent>
                   )}
                 </Card>
+              </div>
 
-                <Card className="order-3 border border-slate-200 dark:border-slate-800 shadow-md">
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-lg flex items-center">
-                      <FileText className="mr-2 h-5 w-5 text-primary" />
-                      Export Options
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-4">
-                      <div className="flex items-center space-x-2">
-                        <Checkbox
-                          id="auto-linebreak"
-                          checked={autoLinebreak}
-                          onCheckedChange={checked => setAutoLinebreak(checked === true)}
-                        />
-                        <Label htmlFor="auto-linebreak" className="cursor-pointer">
-                          Auto linebreak
-                          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                            Prevent paragraphs from being split across pages
-                          </p>
-                        </Label>
-                      </div>
-
-                      <Separator />
-
-                      <Button
-                        onClick={handleDownloadPDF}
-                        disabled={!pdfUrl}
-                        className="w-full"
-                      >
-                        <FileDown className="mr-2 h-4 w-4" />
-                        Download PDF
-                      </Button>
-
-                      <Separator />
-
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => setIsAdvancedExportOpen(prev => !prev)}
-                        className="w-full justify-between"
-                      >
-                        <span className="text-sm">Advanced Export Tools</span>
-                        {isAdvancedExportOpen ? (
-                          <ChevronUp className="h-4 w-4" />
-                        ) : (
-                          <ChevronDown className="h-4 w-4" />
-                        )}
-                      </Button>
-
-                      {isAdvancedExportOpen && (
-                        <div className="space-y-3 rounded-md border border-slate-200 dark:border-slate-700 p-3">
-                          <div className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-                            Google Docs / Word
-                          </div>
-                          <Button
-                            onClick={handleDownloadDocx}
-                            disabled={songs.length === 0}
-                            className="w-full"
-                          >
-                            <FileType className="mr-2 h-4 w-4" />
-                            Download Word Doc (.docx)
-                          </Button>
-                          <div className="text-xs text-slate-500 dark:text-slate-400 text-center">
-                            Upload this file to Google Docs to preserve formatting
-                          </div>
-                          <Button
-                            onClick={handleCopyToClipboard}
-                            disabled={songs.length === 0}
-                            variant="outline"
-                            className="w-full"
-                          >
-                            {copySuccess ? (
-                              <>
-                                <Check className="mr-2 h-4 w-4" />
-                                Copied to Clipboard!
-                              </>
-                            ) : (
-                              <>
-                                <Copy className="mr-2 h-4 w-4" />
-                                Copy as Plain Text
-                              </>
-                            )}
-                          </Button>
-                        </div>
+              <div className="lg:col-span-7">
+                <Card className="overflow-hidden shadow-sm lg:sticky lg:top-24">
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <FileText className="h-5 w-5 flex-shrink-0 text-primary" />
+                      <span className="truncate font-semibold">
+                        {setlistName.trim() || "PDF preview"}
+                      </span>
+                      {previewSongs.length > 0 && (
+                        <span className="flex-shrink-0 text-sm text-slate-500">
+                          · {pluralize(previewSongs.length, "song")}
+                        </span>
                       )}
                     </div>
-                  </CardContent>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setIsFullScreen(true)}
+                      disabled={!pdfUrl}
+                      title="Open fullscreen with autoscroll (F)"
+                    >
+                      <Maximize className="mr-1.5 h-4 w-4" />
+                      Fullscreen
+                    </Button>
+                  </div>
+                  {pdfUrl ? (
+                    <iframe
+                      src={pdfUrl}
+                      className="block h-[75vh] w-full bg-slate-200 lg:h-[calc(100vh-10.5rem)]"
+                      title="PDF Preview"
+                    />
+                  ) : (
+                    <div className="flex h-[50vh] flex-col items-center justify-center gap-3 bg-slate-50 px-6 text-center text-slate-500 lg:h-[calc(100vh-10.5rem)]">
+                      {previewSongs.length > 0 ? (
+                        <>
+                          <Loader2 className="h-8 w-8 animate-spin" />
+                          Generating PDF preview…
+                        </>
+                      ) : (
+                        <>
+                          <FileText className="h-12 w-12 text-slate-300" />
+                          <p className="text-base font-medium text-slate-600">Your PDF will appear here</p>
+                          <p className="max-w-sm text-sm">
+                            Add songs from Ultimate Guitar or paste tab text. Each song can be transposed on its
+                            own, and everything is combined into one PDF.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </Card>
               </div>
             </div>
           )}
 
-          {workspaceTab === "editor" &&
-            songs.length === 0 &&
-            previewSongs.length === 0 &&
-            !isLoading && (
-            <Card className="border border-slate-200 dark:border-slate-800 shadow-md bg-slate-50 dark:bg-slate-900">
-              <CardContent className="p-12">
-                <div className="flex flex-col items-center justify-center text-center space-y-4">
-                  <Music2 className="h-16 w-16 text-slate-300 dark:text-slate-700" />
-                  <h3 className="text-xl font-medium text-slate-700 dark:text-slate-300">
-                    Create your setlist
-                  </h3>
-                  <p className="text-slate-500 dark:text-slate-400 max-w-md">
-                    Add multiple songs from Ultimate Guitar to create a combined
-                    setlist. Each song can be transposed individually, and all
-                    songs will be combined into one PDF document.
-                  </p>
+          {view === "saved" && (
+            <Card className="shadow-sm">
+              <SectionHeading
+                icon={<FolderOpen className="h-5 w-5" />}
+                title="My setlists"
+                description="Saved in this browser. Open one to edit it, or add its songs to your current setlist."
+                action={
+                  <Button
+                    size="sm"
+                    onClick={() => saveSetlist()}
+                    disabled={songs.length === 0}
+                    title={songs.length === 0 ? "Add songs in the editor first" : undefined}
+                  >
+                    <Save className="mr-2 h-4 w-4" />
+                    Save current
+                  </Button>
+                }
+              />
+              <CardContent className="space-y-4">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    value={savedSetlistSearch}
+                    onChange={e => setSavedSetlistSearch(e.target.value)}
+                    placeholder="Search setlists or songs"
+                    className="pl-9"
+                  />
+                </div>
+
+                <div className="max-h-[calc(100vh-17rem)] space-y-2 overflow-y-auto pr-1">
+                  {savedSetlists.length === 0 ? (
+                    <div className="rounded-lg border-2 border-dashed border-slate-200 px-6 py-12 text-center">
+                      <FolderOpen className="mx-auto h-10 w-10 text-slate-300" />
+                      <p className="mt-3 font-medium text-slate-700">No saved setlists yet</p>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Build a setlist in the editor and press <strong>Save setlist</strong>.
+                      </p>
+                    </div>
+                  ) : filteredSavedSetlists.length === 0 ? (
+                    <p className="py-6 text-center text-sm text-slate-500">No matching setlists.</p>
+                  ) : (
+                    filteredSavedSetlists.map(saved => (
+                      <div
+                        key={saved.id}
+                        className={cn(
+                          "flex flex-col gap-3 rounded-lg border bg-white p-4 sm:flex-row sm:items-center",
+                          saved.id === activeSavedSetlistId
+                            ? "border-primary/60 ring-1 ring-primary/30"
+                            : "border-slate-200"
+                        )}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => openSavedSetlist(saved)}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-base font-semibold text-slate-900">
+                              {saved.name}
+                            </span>
+                            {saved.id === activeSavedSetlistId && (
+                              <span className="flex-shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                                Open
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 text-sm text-slate-500">
+                            {pluralize(saved.songs.length, "song")} · updated {formatRelativeTime(saved.updatedAt)}
+                          </div>
+                          <div className="mt-1 truncate text-sm text-slate-600">
+                            {saved.songs.map(song => song.song).join(" · ")}
+                          </div>
+                        </button>
+                        <div className="flex flex-shrink-0 items-center gap-2">
+                          <Button size="sm" onClick={() => openSavedSetlist(saved)}>
+                            <FolderOpen className="mr-1.5 h-4 w-4" />
+                            Open
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => appendSavedSetlist(saved)}
+                            title="Add these songs to the end of your current setlist"
+                          >
+                            <ListPlus className="mr-1.5 h-4 w-4" />
+                            Add songs
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => deleteSavedSetlist(saved)}
+                            className="h-9 w-9 text-red-500 hover:bg-red-50 hover:text-red-700"
+                            title="Delete saved setlist"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               </CardContent>
             </Card>
+          )}
+
+          {view === "published" && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+              <div className="space-y-6 lg:col-span-4">
+                <Card className="shadow-sm">
+                  <SectionHeading
+                    icon={<Upload className="h-5 w-5" />}
+                    title="Publish your setlist"
+                    description="Share your current setlist so anyone can view or add it."
+                  />
+                  <CardContent className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="publish-title" className="text-sm font-medium">
+                        Title
+                      </Label>
+                      <Input
+                        id="publish-title"
+                        value={publishTitle}
+                        onChange={e => setPublishTitle(e.target.value)}
+                        placeholder={defaultPublishTitle}
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="publisher-name" className="text-sm font-medium">
+                        Your name <span className="font-normal text-slate-500">(optional)</span>
+                      </Label>
+                      <Input
+                        id="publisher-name"
+                        value={publisherName}
+                        onChange={e => setPublisherName(e.target.value)}
+                        placeholder="Anonymous"
+                      />
+                    </div>
+                    <Button
+                      onClick={publishCurrentSetlist}
+                      disabled={songs.length === 0 || isPublishing}
+                      className="w-full"
+                    >
+                      {isPublishing ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Publishing
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="mr-2 h-4 w-4" />
+                          {songs.length === 0
+                            ? "Add songs to publish"
+                            : `Publish ${pluralize(songs.length, "song")}`}
+                        </>
+                      )}
+                    </Button>
+                  </CardContent>
+                </Card>
+
+                <Card className="shadow-sm">
+                  <CardContent className="space-y-1.5 pt-6">
+                    <Label htmlFor="delete-password" className="text-sm font-medium">
+                      Delete password
+                    </Label>
+                    <Input
+                      id="delete-password"
+                      type="password"
+                      value={deletePassword}
+                      onChange={e => setDeletePassword(e.target.value)}
+                      placeholder="Ask Allen"
+                    />
+                    <p className="text-sm text-slate-500">Needed only to remove published tabs.</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="shadow-sm lg:col-span-8">
+                <SectionHeading
+                  icon={<Globe className="h-5 w-5" />}
+                  title="Public tabs"
+                  description={
+                    publicTabs.length > 0
+                      ? `${pluralize(publicTabs.length, "published tab")}`
+                      : "Anyone can publish here."
+                  }
+                  action={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={loadPublicTabs}
+                      disabled={isPublicTabsLoading}
+                      title="Refresh public tabs"
+                    >
+                      <RefreshCw
+                        className={cn("mr-1.5 h-4 w-4", isPublicTabsLoading && "animate-spin")}
+                      />
+                      Refresh
+                    </Button>
+                  }
+                />
+                <CardContent className="space-y-3">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                    <Input
+                      value={publicTabsSearch}
+                      onChange={e => setPublicTabsSearch(e.target.value)}
+                      placeholder="Search by song, artist, setlist, or publisher"
+                      className="pl-9"
+                    />
+                  </div>
+
+                  <div className="max-h-[calc(100vh-16rem)] min-h-[420px] divide-y divide-slate-100 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                    {isPublicTabsLoading && publicTabs.length === 0 ? (
+                      <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-500">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Loading public tabs…
+                      </div>
+                    ) : publicTabs.length === 0 ? (
+                      <p className="py-12 text-center text-sm text-slate-500">
+                        No public tabs yet. Publish your current setlist to start.
+                      </p>
+                    ) : filteredPublicTabs.length === 0 ? (
+                      <p className="py-12 text-center text-sm text-slate-500">No matching tabs found.</p>
+                    ) : (
+                      filteredPublicTabs.map(publicTab => (
+                        <div
+                          key={publicTab.id}
+                          className="flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => openPublicTabPreview(publicTab)}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <div className="truncate text-[15px] font-semibold text-slate-900">
+                              {publicTab.setlistTitle}
+                            </div>
+                            <div className="truncate text-sm text-slate-500">
+                              {publicTab.publisherName} · {pluralize(publicTab.songs.length, "song")} ·{" "}
+                              {new Date(publicTab.publishedAt).toLocaleDateString()}
+                            </div>
+                          </button>
+                          <div className="flex flex-shrink-0 items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => openPublicTabPreview(publicTab)}
+                              className="h-8 px-2.5"
+                            >
+                              <Eye className="h-4 w-4 sm:mr-1.5" />
+                              <span className="hidden sm:inline">Preview</span>
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => addPublicTabToSetlist(publicTab)}
+                              className="h-8 px-2.5"
+                            >
+                              <Plus className="h-4 w-4 sm:mr-1.5" />
+                              <span className="hidden sm:inline">Add</span>
+                            </Button>
+                            {deletePassword.trim() && (
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={() => deletePublicTab(publicTab)}
+                                disabled={deletingTabId === publicTab.id}
+                                className="h-8 w-8 text-red-500 hover:bg-red-50 hover:text-red-700"
+                                title="Delete tab"
+                              >
+                                {deletingTabId === publicTab.id ? (
+                                  <Loader2 className="h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Trash2 className="h-4 w-4" />
+                                )}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
           )}
         </div>
       </main>
@@ -2148,16 +2571,15 @@ export default function ChordTransposer() {
           }
         }}
       >
-        <DialogContent className="flex items-center justify-center p-4">
-          <Card className="w-full max-w-lg border border-slate-200 dark:border-slate-800 shadow-xl">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-lg">Publish Song</CardTitle>
-              <CardDescription>
-                Share this song to the public tab list.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="space-y-1">
+        <DialogContent className="flex items-center justify-center bg-transparent p-4">
+          <Card className="w-full max-w-lg shadow-xl">
+            <SectionHeading
+              icon={<Upload className="h-5 w-5" />}
+              title="Publish song"
+              description="Share this song to the public tab list."
+            />
+            <CardContent className="space-y-4">
+              <div className="space-y-1.5">
                 <Label htmlFor="publish-song-title">Song name</Label>
                 <Input
                   id="publish-song-title"
@@ -2166,7 +2588,7 @@ export default function ChordTransposer() {
                   placeholder="Song name"
                 />
               </div>
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <Label htmlFor="publish-song-author">Author (optional)</Label>
                 <Input
                   id="publish-song-author"
@@ -2195,7 +2617,7 @@ export default function ChordTransposer() {
                   ) : (
                     <>
                       <Upload className="mr-2 h-4 w-4" />
-                      Publish Song
+                      Publish song
                     </>
                   )}
                 </Button>
@@ -2214,99 +2636,102 @@ export default function ChordTransposer() {
           }
         }}
       >
-        <DialogContent className="flex items-start justify-center overflow-y-auto p-4">
-          <Card className="w-full max-w-4xl border border-slate-200 dark:border-slate-800 shadow-xl">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-xl">
-                {previewPublicTab?.setlistTitle || "Published Tab"}
-              </CardTitle>
-              <CardDescription>
-                {previewPublicTab
-                  ? `${previewPublicTab.publisherName} • ${new Date(previewPublicTab.publishedAt).toLocaleString()}`
-                  : ""}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Input
-                value={publicSongSearch}
-                onChange={e => setPublicSongSearch(e.target.value)}
-                placeholder="Search songs in this tab"
-              />
-              <div className="space-y-3">
-                {filteredPreviewSongs.length === 0 ? (
-                  <p className="text-sm text-slate-500 dark:text-slate-400">
-                    No songs match your search.
-                  </p>
-                ) : (
-                  filteredPreviewSongs.map((song, index) => (
-                    <div
-                      key={`${previewPublicTab?.id || "preview"}-${index}`}
-                      className="rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40 p-3"
-                    >
-                      <div className="text-sm font-semibold">
-                        {song.song} <span className="text-slate-500">• {song.artist}</span>
-                      </div>
-                      <pre className="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-slate-700 dark:text-slate-300 font-mono">
-                        {stripChordMarkup(song.transposedChords)}
-                      </pre>
-                    </div>
-                  ))
-                )}
+        <DialogContent className="flex items-start justify-center overflow-y-auto bg-transparent p-4 sm:p-8">
+          <Card className="w-full max-w-4xl shadow-xl">
+            <CardHeader className="sticky top-0 z-10 rounded-t-lg border-b border-slate-200 bg-white pb-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <CardTitle className="text-xl font-semibold">
+                    {previewPublicTab?.setlistTitle || "Published tab"}
+                  </CardTitle>
+                  <CardDescription className="mt-1.5 text-sm">
+                    {previewPublicTab
+                      ? `${previewPublicTab.publisherName} · ${pluralize(previewPublicTab.songs.length, "song")} · ${new Date(previewPublicTab.publishedAt).toLocaleString()}`
+                      : ""}
+                  </CardDescription>
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      if (!previewPublicTab) return
+                      addPublicTabToSetlist(previewPublicTab)
+                    }}
+                  >
+                    <Plus className="mr-1.5 h-4 w-4" />
+                    Add to setlist
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setPreviewPublicTab(null)}
+                    className="h-9 w-9"
+                    aria-label="Close"
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
               </div>
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <Button variant="outline" onClick={() => setPreviewPublicTab(null)}>
-                  Close
-                </Button>
-                <Button
-                  onClick={() => {
-                    if (!previewPublicTab) return
-                    addPublicTabToSetlist(previewPublicTab)
-                  }}
-                >
-                  Add to Setlist
-                </Button>
-                {previewPublicTab && (
+              {previewPublicTab && previewPublicTab.songs.length > 1 && (
+                <div className="relative pt-3">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 mt-1.5 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                  <Input
+                    value={publicSongSearch}
+                    onChange={e => setPublicSongSearch(e.target.value)}
+                    placeholder="Search songs in this tab"
+                    className="pl-9"
+                  />
+                </div>
+              )}
+            </CardHeader>
+            <CardContent className="space-y-4 pt-4">
+              {filteredPreviewSongs.length === 0 ? (
+                <p className="py-6 text-center text-sm text-slate-500">No songs match your search.</p>
+              ) : (
+                filteredPreviewSongs.map((song, index) => (
+                  <section
+                    key={`${previewPublicTab?.id || "preview"}-${index}`}
+                    className="rounded-lg border border-slate-200 bg-slate-50 p-4"
+                  >
+                    <h4 className="text-base font-semibold">
+                      {cleanTabText(song.song)}{" "}
+                      <span className="font-normal text-slate-500">· {cleanTabText(song.artist)}</span>
+                    </h4>
+                    <pre
+                      className="mt-3 overflow-x-auto whitespace-pre text-sm leading-6 text-slate-800"
+                      style={{ fontFamily: getBrowserFontStack(previewPublicTab?.exportSettings?.monoFont || monoFont) }}
+                    >
+                      {renderChordText(song.transposedChords)}
+                    </pre>
+                  </section>
+                ))
+              )}
+              {previewPublicTab && deletePassword.trim() && (
+                <div className="flex justify-end">
                   <Button
                     variant="outline"
                     onClick={() => deletePublicTab(previewPublicTab)}
-                    disabled={
-                      deletingTabId === previewPublicTab.id ||
-                      !deletePassword.trim()
-                    }
+                    disabled={deletingTabId === previewPublicTab.id}
                     className="text-red-600 hover:text-red-700"
-                    title={
-                      deletePassword.trim()
-                        ? "Delete tab"
-                        : "Enter delete password in Published tab first"
-                    }
                   >
                     {deletingTabId === previewPublicTab.id ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Deleting
-                      </>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     ) : (
-                      <>
-                        <Trash2 className="mr-2 h-4 w-4" />
-                        Delete
-                      </>
+                      <Trash2 className="mr-2 h-4 w-4" />
                     )}
+                    Delete from public tabs
                   </Button>
-                )}
-              </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         </DialogContent>
       </Dialog>
 
-      <footer className="bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 py-6 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center">
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            tabs/chords downloader. Happy 20th, Justin.
-          </p>
-          <p className="text-sm text-slate-500 dark:text-slate-400">
-            Made with ❤️ by Allen
-          </p>
+      <footer className="border-t border-slate-200 bg-white px-4 py-5 sm:px-6 lg:px-8">
+        <div className="mx-auto flex max-w-[1400px] flex-col items-center justify-between gap-1 text-sm text-slate-500 sm:flex-row">
+          <p>tabs/chords downloader. Happy 20th, Justin.</p>
+          <p>Made with ❤️ by Allen</p>
         </div>
       </footer>
 
@@ -2315,7 +2740,7 @@ export default function ChordTransposer() {
           pdfUrl={pdfUrl}
           isOpen={isFullScreen}
           onClose={() => setIsFullScreen(false)}
-          title={songs.length === 1 ? songs[0].song : `Setlist (${songs.length} songs)`}
+          title={setlistName.trim() || (songs.length === 1 ? songs[0].song : `Setlist (${pluralize(songs.length, "song")})`)}
           subtitle={songs.length === 1 ? songs[0].artist : ""}
         />
       )}

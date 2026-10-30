@@ -40,3 +40,27 @@ export interface PublicTabsDb {
   version: number
   tabs: PublicTabEntry[]
 }
+
+export interface SavedSetlistSong {
+  uri: string
+  artist: string
+  song: string
+  chords: string
+  transposeStep: number
+}
+
+export interface SavedSetlistSettings {
+  fontSize: number
+  autoLinebreak: boolean
+  monoFont: MonoFontOption
+  noteBoxes: PositionedNoteBox[]
+}
+
+export interface SavedSetlist {
+  id: string
+  name: string
+  createdAt: string
+  updatedAt: string
+  songs: SavedSetlistSong[]
+  settings: SavedSetlistSettings
+}
