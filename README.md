@@ -2,6 +2,10 @@
 
 Setlist/tab editor with live transposition, PDF/DOCX export, positioned note boxes, and public tab publishing.
 
+- **Add songs** by pasting one or many Ultimate Guitar links (one per line), or by pasting tab text.
+- **My Setlists**: save the current setlist (songs, transpositions, layout settings, note boxes) by name, then reopen it or append its songs later. Saved setlists live in the browser's localStorage, and the setlist you're working on is autosaved across reloads.
+- Ultimate Guitar links are fetched server-side by `/api/fetch-tab`, with public CORS proxies as a browser-side fallback.
+
 ## Run locally
 
 ```bash
