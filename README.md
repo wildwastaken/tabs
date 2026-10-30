@@ -2,9 +2,14 @@
 
 Setlist/tab editor with live transposition, PDF/DOCX export, positioned note boxes, and public tab publishing.
 
-- **Add songs** by pasting one or many Ultimate Guitar links (one per line), or by pasting tab text.
-- **My Setlists**: save the current setlist (songs, transpositions, layout settings, note boxes) by name, then reopen it or append its songs later. Saved setlists live in the browser's localStorage, and the setlist you're working on is autosaved across reloads.
+- **Editor**: add songs from the shared library, by Ultimate Guitar link (one or many), or by pasting tab text. Drag to reorder, transpose per song, export PDF/DOCX.
+- **Setlists**: saved to the shared database so everyone sees them. Open one to edit it, or append its songs to the current setlist.
+- **Songs**: the shared library of chord sheets ("tabs"). Publish a song from the editor to add it.
+- Lists can be sorted by date added, date modified, or name (remembered per browser).
+- Editing library songs and deleting songs or setlists requires the edit/delete password (`TABS_DELETE_PASSWORD`), entered once and remembered in the browser.
 - Ultimate Guitar links are fetched server-side by `/api/fetch-tab`, with public CORS proxies as a browser-side fallback.
+
+The database tables (`public_tabs`, `setlists`) are created or upgraded automatically on first use.
 
 ## Run locally
 
@@ -26,7 +31,7 @@ Build currently skips ESLint in `next.config.ts` and still performs type checkin
 Copy `.env.example` to `.env.local` and fill in values:
 
 - `NETLIFY_DATABASE_URL`: Postgres connection URL for public tabs storage.
-- `TABS_DELETE_PASSWORD`: Password required to delete published tabs. Set this to `qoheleth` (or your own value) in production.
+- `TABS_DELETE_PASSWORD`: Password required to edit library songs and to delete songs or setlists. Set this to `qoheleth` (or your own value) in production.
 - `DISCORD_PUBLISH_WEBHOOK_URL`: Optional server-side secret containing the full Discord webhook URL for publish logs. If unset or blank, Discord notifications are disabled; publishing still works. Never prefix this variable with `NEXT_PUBLIC_` or commit its value.
 
 For Netlify deploys, set `TABS_DELETE_PASSWORD` and `DISCORD_PUBLISH_WEBHOOK_URL` in Site configuration -> Environment variables. Make the webhook variable available to Functions in the deployment context you use, then redeploy. For local development, put the webhook value only in the ignored `.env.local` file.

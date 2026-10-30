@@ -31,6 +31,7 @@ export interface PublicTabEntry {
   publisherName: string
   setlistTitle: string
   publishedAt: string
+  updatedAt?: string
   notes?: string
   exportSettings: Pick<ExportSettings, "monoFont" | "noteBoxes">
   songs: PublicTabSong[]
