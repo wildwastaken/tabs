@@ -127,16 +127,18 @@ export function extractTabFromStore(store: unknown): UltimateGuitarTab | null {
 }
 
 export function extractTabFromHtml(html: string): UltimateGuitarTab | null {
-  const storeMatch =
-    html.match(/class="js-store"[^>]*?data-content="([^"]*)"/) ||
-    html.match(/data-content="([^"]*)"[^>]*?class="js-store"/)
-
-  if (storeMatch) {
+  // Any element whose class list includes js-store, with data-content in any position.
+  const storeTags = html.match(/<[a-z]+\b[^>]*\bjs-store\b[^>]*>/gi) || []
+  for (const tag of storeTags) {
+    const contentMatch = tag.match(/\bdata-content=(?:"([^"]*)"|'([^']*)')/)
+    if (!contentMatch) continue
     try {
-      const tab = extractTabFromStore(JSON.parse(decodeHtmlEntities(storeMatch[1])))
+      const tab = extractTabFromStore(
+        JSON.parse(decodeHtmlEntities(contentMatch[1] ?? contentMatch[2]))
+      )
       if (tab) return tab
     } catch {
-      // fall through to the legacy inline-script format
+      // try the next candidate / legacy inline-script format
     }
   }
 
@@ -150,4 +152,51 @@ export function extractTabFromHtml(html: string): UltimateGuitarTab | null {
   }
 
   return null
+}
+
+export interface ImportedTabPayload {
+  song?: string
+  artist?: string
+  content?: string
+  url?: string
+}
+
+// Bookmarklet the user runs on an Ultimate Guitar page in their own browser.
+// It reads the tab from the page they already have open and hands it to the
+// app through the URL fragment (never sent to any server).
+export function buildSendToTabsBookmarklet(appOrigin: string): string {
+  const source = `(function(){
+var song="",artist="",content="";
+try{
+var el=document.querySelector(".js-store");
+var d=JSON.parse(el.getAttribute("data-content"));
+var p=(d.store||d).page.data;
+content=p.tab_view.wiki_tab.content;
+song=p.tab.song_name;artist=p.tab.artist_name;
+}catch(e){}
+if(!content){
+var pre=document.querySelector("pre");
+if(pre)content=pre.innerText;
+var h=document.querySelector("h1");
+if(h)song=h.innerText.replace(/\\s+(chords|tab|tabs|ukulele|bass)\\s*$/i,"");
+}
+if(!content){alert("Could not find chords on this page. Open a chords/tab page on Ultimate Guitar first.");return;}
+var json=JSON.stringify({song:song,artist:artist,content:content,url:location.href.split(/[?#]/)[0]});
+var b64=btoa(unescape(encodeURIComponent(json))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");
+window.open(${JSON.stringify(appOrigin)}+"/#import="+b64,"tabs-app");
+})();`
+  return `javascript:${encodeURIComponent(source.replace(/\n/g, ""))}`
+}
+
+export function decodeImportPayload(hash: string): ImportedTabPayload | null {
+  const match = hash.match(/^#import=([A-Za-z0-9_-]+)$/)
+  if (!match) return null
+  try {
+    const base64 = match[1].replace(/-/g, "+").replace(/_/g, "/")
+    const bytes = Uint8Array.from(atob(base64), char => char.charCodeAt(0))
+    const payload = JSON.parse(new TextDecoder().decode(bytes)) as ImportedTabPayload
+    return typeof payload.content === "string" && payload.content.trim() ? payload : null
+  } catch {
+    return null
+  }
 }

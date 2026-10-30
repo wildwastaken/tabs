@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   type ReactNode,
 } from "react"
 import {
@@ -18,6 +19,8 @@ import {
   extractTabFromHtml,
   extractUrls,
   isUltimateGuitarUrl,
+  buildSendToTabsBookmarklet,
+  decodeImportPayload,
   normalizeUltimateGuitarUrl,
   type UltimateGuitarTab,
 } from "../lib/ultimate-guitar"
@@ -115,8 +118,37 @@ interface PublicTabsResponse {
 interface WorkingSetlist {
   name: string
   savedSetlistId: string | null
-  songs: SongData[]
+  songs: Array<Omit<SongData, "transposedChords">>
   settings: SavedSetlistSettings
+}
+
+// Deterministic serialization (fixed key order, no derived fields) so that
+// syncing between browser tabs settles instead of echoing writes back and forth.
+function serializeWorkingSetlist(
+  name: string,
+  savedSetlistId: string | null,
+  songs: SongData[],
+  settings: SavedSetlistSettings
+): string {
+  const working: WorkingSetlist = {
+    name,
+    savedSetlistId,
+    songs: songs.map(({ id, uri, artist, song, chords, transposeStep }) => ({
+      id,
+      uri,
+      artist,
+      song,
+      chords,
+      transposeStep,
+    })),
+    settings: {
+      fontSize: settings.fontSize,
+      autoLinebreak: settings.autoLinebreak,
+      monoFont: settings.monoFont,
+      noteBoxes: settings.noteBoxes,
+    },
+  }
+  return JSON.stringify(working)
 }
 
 function createId(): string {
@@ -494,6 +526,8 @@ export default function ChordTransposer() {
   const [loadingProgress, setLoadingProgress] = useState<{ done: number; total: number } | null>(null)
   const [pastedTabText, setPastedTabText] = useState("")
   const [isPasteOpen, setIsPasteOpen] = useState(false)
+  const [isBookmarkletOpen, setIsBookmarkletOpen] = useState(false)
+  const [bookmarkletCopied, setBookmarkletCopied] = useState(false)
   const [editingSongId, setEditingSongId] = useState<string | null>(null)
 
   // PDF + export
@@ -589,37 +623,116 @@ export default function ChordTransposer() {
 
   // ---------- Persistence (saved setlists + autosaved working setlist) ----------
 
+  const applyWorkingSetlist = useCallback((working: WorkingSetlist | null) => {
+    if (!working || !Array.isArray(working.songs)) return
+    setSongs(
+      working.songs.map(song => ({
+        id: song.id || createId(),
+        uri: song.uri,
+        artist: song.artist,
+        song: song.song,
+        chords: song.chords,
+        transposedChords: song.chords,
+        transposeStep: song.transposeStep || 0,
+      }))
+    )
+    setSetlistName(working.name || "")
+    setActiveSavedSetlistId(working.savedSetlistId || null)
+    if (working.settings) {
+      setFontSize(working.settings.fontSize ?? 10)
+      setAutoLinebreak(Boolean(working.settings.autoLinebreak))
+      setMonoFont(working.settings.monoFont || "roboto-mono")
+      setNoteBoxes(Array.isArray(working.settings.noteBoxes) ? working.settings.noteBoxes : [])
+    }
+  }, [])
+
+  // Songs sent from an Ultimate Guitar page by the "Send to tabs" bookmarklet
+  // arrive as #import=<base64 json>.
+  const importSongFromHash = useCallback(() => {
+    const payload = decodeImportPayload(window.location.hash)
+    if (!payload?.content) return
+
+    window.history.replaceState(null, "", window.location.pathname + window.location.search)
+
+    const songName = payload.song?.trim() || "Untitled Song"
+    const artist = payload.artist?.trim() || "Unknown Artist"
+    let chords = payload.content.replace(/\r\n/g, "\n")
+    if (!chords.includes("[ch]")) {
+      // Plain text copied from the rendered page: detect chord lines ourselves.
+      try {
+        chords = parsePastedSong(`Title: ${songName}\nArtist: ${artist}\n\n${chords}`).chords
+      } catch {
+        // keep the raw text
+      }
+    }
+
+    const id = createId()
+    setSongs(prev => [
+      ...prev,
+      {
+        id,
+        uri: payload.url && isUltimateGuitarUrl(payload.url) ? payload.url : `manual://imported/${id}`,
+        artist,
+        song: songName,
+        chords,
+        transposedChords: chords,
+        transposeStep: 0,
+      },
+    ])
+    setView("editor")
+    showNotice(`Added "${songName}" from Ultimate Guitar`)
+  }, [showNotice])
+
+  const lastWrittenWorkingRef = useRef<string | null>(null)
+
   useEffect(() => {
     const storedSetlists = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
     if (Array.isArray(storedSetlists)) setSavedSetlists(storedSetlists)
 
-    const working = readStorage<WorkingSetlist>(WORKING_SETLIST_STORAGE_KEY)
-    if (working && Array.isArray(working.songs)) {
-      setSongs(
-        working.songs.map(song => ({ ...song, transposedChords: song.chords }))
-      )
-      setSetlistName(working.name || "")
-      setActiveSavedSetlistId(working.savedSetlistId || null)
-      if (working.settings) {
-        setFontSize(working.settings.fontSize ?? 10)
-        setAutoLinebreak(Boolean(working.settings.autoLinebreak))
-        setMonoFont(working.settings.monoFont || "roboto-mono")
-        setNoteBoxes(Array.isArray(working.settings.noteBoxes) ? working.settings.noteBoxes : [])
+    applyWorkingSetlist(readStorage<WorkingSetlist>(WORKING_SETLIST_STORAGE_KEY))
+    importSongFromHash()
+    setHasHydrated(true)
+
+    // Keep several open tabs of the app in sync (e.g. a song sent from
+    // Ultimate Guitar opens/updates another tab).
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === SAVED_SETLISTS_STORAGE_KEY) {
+        const next = readStorage<SavedSetlist[]>(SAVED_SETLISTS_STORAGE_KEY)
+        setSavedSetlists(Array.isArray(next) ? next : [])
+      } else if (event.key === WORKING_SETLIST_STORAGE_KEY && event.newValue) {
+        if (event.newValue === lastWrittenWorkingRef.current) return
+        try {
+          lastWrittenWorkingRef.current = event.newValue
+          applyWorkingSetlist(JSON.parse(event.newValue) as WorkingSetlist)
+        } catch {
+          // ignore malformed data
+        }
       }
     }
 
-    setHasHydrated(true)
-  }, [])
+    window.addEventListener("storage", handleStorage)
+    window.addEventListener("hashchange", importSongFromHash)
+    return () => {
+      window.removeEventListener("storage", handleStorage)
+      window.removeEventListener("hashchange", importSongFromHash)
+    }
+  }, [applyWorkingSetlist, importSongFromHash])
 
   useEffect(() => {
     if (!hasHydrated) return
-    const working: WorkingSetlist = {
-      name: setlistName,
-      savedSetlistId: activeSavedSetlistId,
+    const serialized = serializeWorkingSetlist(
+      setlistName,
+      activeSavedSetlistId,
       songs,
-      settings: currentSettings,
+      currentSettings
+    )
+    if (serialized === lastWrittenWorkingRef.current) return
+    lastWrittenWorkingRef.current = serialized
+    try {
+      window.localStorage.setItem(WORKING_SETLIST_STORAGE_KEY, serialized)
+    } catch (err) {
+      console.error("Failed to autosave setlist:", err)
     }
-    writeStorage(WORKING_SETLIST_STORAGE_KEY, working)
   }, [hasHydrated, setlistName, activeSavedSetlistId, songs, currentSettings])
 
   const persistSavedSetlists = useCallback((next: SavedSetlist[]) => {
@@ -791,10 +904,11 @@ export default function ChordTransposer() {
     setLinkInput(failed.join("\n"))
 
     if (failed.length > 0) {
+      setIsBookmarkletOpen(true)
       setError(
         `Couldn't load ${pluralize(failed.length, "link")}. ${
           added > 0 ? `Added ${pluralize(added, "song")}. ` : ""
-        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box, or paste the tab text instead.`
+        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box. Ultimate Guitar may be blocking automatic downloads — use the "Send to tabs" button below, or paste the tab text.`
       )
     } else {
       showNotice(`Added ${pluralize(added, "song")}`)
@@ -1593,6 +1707,67 @@ export default function ChordTransposer() {
                           )}
                         </Button>
                       </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 bg-slate-50">
+                      <button
+                        type="button"
+                        onClick={() => setIsBookmarkletOpen(prev => !prev)}
+                        className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-slate-700 hover:text-slate-900"
+                        aria-expanded={isBookmarkletOpen}
+                      >
+                        <span>Link not loading? Send songs straight from Ultimate Guitar</span>
+                        {isBookmarkletOpen ? (
+                          <ChevronUp className="h-4 w-4 flex-shrink-0" />
+                        ) : (
+                          <ChevronDown className="h-4 w-4 flex-shrink-0" />
+                        )}
+                      </button>
+                      {isBookmarkletOpen && (
+                        <div className="space-y-3 border-t border-slate-200 px-3 pb-3 pt-3 text-sm text-slate-600">
+                          <ol className="list-decimal space-y-1 pl-5">
+                            <li>
+                              Drag this button to your bookmarks bar:{" "}
+                              <a
+                                ref={node => {
+                                  node?.setAttribute("href", buildSendToTabsBookmarklet(window.location.origin))
+                                }}
+                                draggable
+                                onClick={e => {
+                                  e.preventDefault()
+                                  showNotice("Drag the \"Send to tabs\" button onto your bookmarks bar, then click it on an Ultimate Guitar song page.")
+                                }}
+                                className="ml-1 inline-flex cursor-grab items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground shadow-sm active:cursor-grabbing"
+                              >
+                                <Music2 className="h-3.5 w-3.5" />
+                                Send to tabs
+                              </a>
+                            </li>
+                            <li>Open any song on Ultimate Guitar like you normally would.</li>
+                            <li>Click <strong>Send to tabs</strong> in your bookmarks — the song is added here.</li>
+                          </ol>
+                          <p className="text-slate-500">
+                            On a phone, bookmark any page, then edit the bookmark and replace its address with this code:{" "}
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  await navigator.clipboard.writeText(
+                                    buildSendToTabsBookmarklet(window.location.origin)
+                                  )
+                                  setBookmarkletCopied(true)
+                                  setTimeout(() => setBookmarkletCopied(false), 2000)
+                                } catch {
+                                  setError("Couldn't copy to clipboard.")
+                                }
+                              }}
+                              className="font-medium text-primary hover:underline"
+                            >
+                              {bookmarkletCopied ? "Copied!" : "copy bookmark code"}
+                            </button>
+                          </p>
+                        </div>
+                      )}
                     </div>
 
                     <Separator />
