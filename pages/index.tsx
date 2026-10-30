@@ -1024,14 +1024,15 @@ export default function ChordTransposer() {
     try {
       const res = await fetch("/api/public-tabs")
       if (!res.ok) {
-        throw new Error("Failed to load public tabs")
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error || "Failed to load public tabs. Try refreshing.")
       }
 
       const data = (await res.json()) as PublicTabsResponse
       setPublicTabs(Array.isArray(data.tabs) ? data.tabs : [])
     } catch (err) {
       console.error("Failed to fetch public tabs:", err)
-      setError("Failed to load public tabs. Try refreshing.")
+      setError(err instanceof Error ? err.message : "Failed to load public tabs. Try refreshing.")
     } finally {
       setIsPublicTabsLoading(false)
     }
