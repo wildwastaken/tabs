@@ -184,8 +184,10 @@ async function getDbPool(): Promise<PgPoolLike> {
   if (!dbPoolPromise) {
     dbPoolPromise = (async () => {
       try {
-        const requireFn = eval("require") as NodeRequire
-        const pgModule = requireFn("pg") as {
+        // A plain require (not eval'd) so the build traces pg into the
+        // serverless function; Vercel only ships files it can trace.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const pgModule = require("pg") as {
           Pool: new (config: Record<string, unknown>) => PgPoolLike
         }
 
@@ -204,6 +206,26 @@ async function getDbPool(): Promise<PgPoolLike> {
   }
 
   return dbPoolPromise
+}
+
+// User-facing reason for a database failure. Never includes the connection string.
+function describeDbError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String((error as { code: unknown }).code)
+      : ""
+
+  if (!DB_CONNECTION_URL) {
+    return "Public tabs database isn't configured: set NETLIFY_DATABASE_URL (or DATABASE_URL) for this deployment and redeploy."
+  }
+  if (/Cannot find module ['"]pg['"]/.test(message)) {
+    return "Public tabs database driver (pg) is missing from this deployment."
+  }
+  if (code === "28P01" || /password authentication failed/i.test(message)) {
+    return "Public tabs database rejected the login. Check the NETLIFY_DATABASE_URL value."
+  }
+  return `Couldn't connect to the public tabs database${code ? ` (${code})` : ""}. Check NETLIFY_DATABASE_URL.`
 }
 
 function mapDbRowToPublicTabEntry(row: PublicTabRow): PublicTabEntry {
@@ -334,10 +356,7 @@ export default async function handler(
       res.status(200).json({ tabs })
     } catch (error) {
       console.error("Failed to load public tabs:", error)
-      res.status(500).json({
-        error:
-          "Database unavailable for public tabs. Check NETLIFY_DATABASE_URL and pg installation.",
-      })
+      res.status(500).json({ error: describeDbError(error) })
     }
     return
   }
