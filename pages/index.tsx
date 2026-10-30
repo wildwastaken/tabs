@@ -47,6 +47,7 @@ import { Separator } from "../components/ui/separator"
 import { Dialog, DialogContent } from "../components/ui/dialog"
 import { FullScreenPDFViewer } from "../components/FullScreenPDFViewer"
 import { cn } from "../lib/utils"
+import { Select } from "radix-ui"
 import {
   FileText,
   FileDown,
@@ -80,6 +81,8 @@ import {
   SlidersHorizontal,
   StickyNote,
   Library,
+  Maximize2,
+  Minimize2,
   GripVertical,
   ArrowUpDown,
   KeyRound,
@@ -610,21 +613,45 @@ function SearchInput({
 
 function SortSelect({ value, onChange }: { value: SortMode; onChange: (value: SortMode) => void }) {
   return (
-    <label className="relative flex flex-shrink-0 items-center">
-      <span className="sr-only">Sort by</span>
-      <ArrowUpDown className="pointer-events-none absolute left-3 h-4 w-4 text-slate-400" />
-      <select
-        value={value}
-        onChange={e => onChange(e.target.value as SortMode)}
-        className="h-10 rounded-md border border-input bg-white pl-9 pr-3 text-sm text-slate-700"
+    <Select.Root value={value} onValueChange={next => onChange(next as SortMode)}>
+      <Select.Trigger
+        aria-label="Sort by"
+        className="inline-flex h-10 flex-shrink-0 items-center gap-2 whitespace-nowrap rounded-md border border-input bg-white pl-3 pr-2.5 text-sm text-slate-700 shadow-sm transition-colors hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 data-[state=open]:border-primary/60 data-[state=open]:bg-slate-50"
       >
-        {SORT_MODES.map(mode => (
-          <option key={mode} value={mode}>
-            {SORT_LABELS[mode]}
-          </option>
-        ))}
-      </select>
-    </label>
+        <ArrowUpDown className="h-4 w-4 text-slate-400" />
+        <span className="hidden text-slate-500 sm:inline">Sort:</span>
+        <span className="font-medium text-slate-800">
+          <Select.Value />
+        </span>
+        <Select.Icon>
+          <ChevronDown className="h-4 w-4 text-slate-400" />
+        </Select.Icon>
+      </Select.Trigger>
+      <Select.Portal>
+        <Select.Content
+          position="popper"
+          side="bottom"
+          align="end"
+          sideOffset={6}
+          className="z-50 min-w-[var(--radix-select-trigger-width)] overflow-hidden rounded-lg border border-slate-200 bg-white p-1 shadow-lg data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-1"
+        >
+          <Select.Viewport>
+            {SORT_MODES.map(mode => (
+              <Select.Item
+                key={mode}
+                value={mode}
+                className="relative flex cursor-pointer select-none items-center rounded-md py-2 pl-8 pr-3 text-sm text-slate-700 outline-none transition-colors data-[highlighted]:bg-slate-100 data-[highlighted]:text-slate-900 data-[state=checked]:font-medium data-[state=checked]:text-slate-900"
+              >
+                <Select.ItemIndicator className="absolute left-2 inline-flex items-center">
+                  <Check className="h-4 w-4 text-primary" />
+                </Select.ItemIndicator>
+                <Select.ItemText>{SORT_LABELS[mode]}</Select.ItemText>
+              </Select.Item>
+            ))}
+          </Select.Viewport>
+        </Select.Content>
+      </Select.Portal>
+    </Select.Root>
   )
 }
 
@@ -701,6 +728,8 @@ export default function ChordTransposer() {
   const [pastedTabText, setPastedTabText] = useState("")
   const [addSongsMode, setAddSongsMode] = useState<AddSongsMode>("library")
   const [librarySearch, setLibrarySearch] = useState("")
+  const [isFocusMode, setIsFocusMode] = useState(false)
+  const [focusPreviewScope, setFocusPreviewScope] = useState<"song" | "setlist">("song")
   const [editingSongId, setEditingSongId] = useState<string | null>(null)
 
   // PDF + export
@@ -1196,6 +1225,7 @@ export default function ChordTransposer() {
 
       setEditingSongId(null)
       setPastedTabText("")
+      setIsFocusMode(false)
       return
     }
 
@@ -1212,6 +1242,7 @@ export default function ChordTransposer() {
 
     setSongs(prev => [...prev, newSong])
     setPastedTabText("")
+    setIsFocusMode(false)
     showNotice(`Added "${newSong.song}"`)
   }, [
     pastedTabText,
@@ -1573,6 +1604,7 @@ export default function ChordTransposer() {
   const cancelEditingSong = useCallback(() => {
     setEditingSongId(null)
     setPastedTabText("")
+    setIsFocusMode(false)
   }, [])
 
   const removeSong = useCallback(
@@ -1709,30 +1741,58 @@ export default function ChordTransposer() {
     )
   }, [transposeDeps, simplify, halftoneStyle])
 
-  // Generate PDF
-  useEffect(() => {
-    const updatePDF = async () => {
-      if (previewSongs.length === 0) {
-        setPdfUrl(null)
-        return
-      }
+  // In focus mode the preview can show just the song being written or edited,
+  // so it starts on that song instead of page 1 of the setlist.
+  const focusSongs = useMemo(() => {
+    if (editingSongId) return previewSongs.filter(song => song.id === editingSongId)
+    return previewSongs.filter(song => song.id === "draft-preview-song")
+  }, [previewSongs, editingSongId])
 
-      try {
-        const { dataUrl } = await generatePDF(
-          previewSongs,
-          fontSize,
-          autoLinebreak,
-          currentExportSettings
-        )
-        setPdfUrl(dataUrl)
-      } catch (err) {
-        console.error("Failed to generate PDF:", err)
-        setError("Failed to generate PDF preview")
-      }
+  const isFocusSongPreview = isFocusMode && focusPreviewScope === "song" && focusSongs.length > 0
+  const pdfSongs = isFocusSongPreview ? focusSongs : previewSongs
+  const pdfExportSettings = useMemo<ExportSettings>(
+    // Note boxes are placed on setlist pages, so leave them out of a single-song preview.
+    () => (isFocusSongPreview ? { ...currentExportSettings, noteBoxes: [] } : currentExportSettings),
+    [isFocusSongPreview, currentExportSettings]
+  )
+
+  // Generate PDF (debounced so typing doesn't rebuild it on every keystroke)
+  useEffect(() => {
+    if (pdfSongs.length === 0) {
+      setPdfUrl(null)
+      return
     }
 
-    updatePDF()
-  }, [previewSongs, fontSize, autoLinebreak, currentExportSettings])
+    let cancelled = false
+    const timeout = setTimeout(async () => {
+      try {
+        const { dataUrl } = await generatePDF(pdfSongs, fontSize, autoLinebreak, pdfExportSettings)
+        if (!cancelled) setPdfUrl(dataUrl)
+      } catch (err) {
+        console.error("Failed to generate PDF:", err)
+        if (!cancelled) setError("Failed to generate PDF preview")
+      }
+    }, 300)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timeout)
+    }
+  }, [pdfSongs, fontSize, autoLinebreak, pdfExportSettings])
+
+  useEffect(() => {
+    if (!isFocusMode) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsFocusMode(false)
+    }
+    document.addEventListener("keydown", handleKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [isFocusMode])
 
   const exportBaseName =
     setlistName.trim() ||
@@ -1810,6 +1870,56 @@ export default function ChordTransposer() {
     { value: "saved", label: "Setlists", count: savedSetlists.length || undefined },
     { value: "published", label: "Songs", count: publicTabs.length || undefined },
   ]
+
+  const renderPasteTextarea = (id: string, className: string) => (
+    <textarea
+      id={id}
+      value={pastedTabText}
+      onChange={e => setPastedTabText(e.target.value)}
+      onKeyDown={e => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault()
+          addOrConfirmPastedSong()
+        }
+      }}
+      placeholder={"Title: Song Name\nArtist: Artist Name\nKey: G\nCapo: 4\n\n[Verse 1]\nD      G\nLyrics..."}
+      spellCheck={false}
+      className={cn(
+        "w-full rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+        className
+      )}
+      style={{ fontFamily: getBrowserFontStack(monoFont) }}
+    />
+  )
+
+  const pasteActions = (
+    <div className="flex items-center gap-2">
+      {editingSongId && (
+        <Button onClick={cancelEditingSong} variant="outline">
+          Cancel
+        </Button>
+      )}
+      <Button
+        onClick={addOrConfirmPastedSong}
+        disabled={!pastedTabText.trim() || Boolean(pastedTabError)}
+        variant={editingSongId || isFocusMode ? "default" : "secondary"}
+      >
+        {editingSongId ? (
+          <>
+            <Check className="mr-2 h-4 w-4" />
+            Done editing
+          </>
+        ) : (
+          <>
+            <Plus className="mr-2 h-4 w-4" />
+            Add song
+          </>
+        )}
+      </Button>
+    </div>
+  )
+
+  const editingSong = editingSongId ? songs.find(song => song.id === editingSongId) : null
 
   const setlistStatus = isSavingSetlist
     ? "Saving…"
@@ -2053,64 +2163,36 @@ export default function ChordTransposer() {
                     )}
 
                     {addSongsMode === "paste" && (
-                    <div className="space-y-3">
-                      <p className="text-sm text-slate-500">
-                        Start with optional <code className="rounded bg-slate-100 px-1">Title:</code>,{" "}
-                        <code className="rounded bg-slate-100 px-1">Artist:</code>,{" "}
-                        <code className="rounded bg-slate-100 px-1">Key:</code>,{" "}
-                        <code className="rounded bg-slate-100 px-1">Capo:</code> lines, then chords and lyrics.
-                      </p>
-                      <textarea
-                        id="pasted-tab-text"
-                        value={pastedTabText}
-                        onChange={e => setPastedTabText(e.target.value)}
-                        onKeyDown={e => {
-                          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                            e.preventDefault()
-                            addOrConfirmPastedSong()
-                          }
-                        }}
-                        placeholder={
-                          "Title: Song Name\nArtist: Artist Name\nKey: G\nCapo: 4\n\n[Verse 1]\nD      G\nLyrics..."
-                        }
-                        className="min-h-[280px] w-full rounded-md border border-input bg-white px-3 py-2 text-sm leading-6 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                        style={{ fontFamily: getBrowserFontStack(monoFont) }}
-                      />
-                      {pastedTabError && (
-                        <p className="text-sm text-red-600">{pastedTabError}</p>
-                      )}
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <span className="text-sm text-slate-500">
-                          {editingSongId
-                            ? "Preview updates as you type."
-                            : "The draft shows in the preview until you add it."}
-                        </span>
-                        <div className="flex items-center gap-2">
-                          {editingSongId && (
-                            <Button onClick={cancelEditingSong} variant="outline">
-                              Cancel
-                            </Button>
-                          )}
+                      <div className="space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-sm text-slate-500">
+                            Start with optional <code className="rounded bg-slate-100 px-1">Title:</code>,{" "}
+                            <code className="rounded bg-slate-100 px-1">Artist:</code>,{" "}
+                            <code className="rounded bg-slate-100 px-1">Key:</code>,{" "}
+                            <code className="rounded bg-slate-100 px-1">Capo:</code> lines, then chords and lyrics.
+                          </p>
                           <Button
-                            onClick={addOrConfirmPastedSong}
-                            disabled={!pastedTabText.trim() || Boolean(pastedTabError)}
-                            variant={editingSongId ? "default" : "secondary"}
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setIsFocusMode(true)}
+                            className="flex-shrink-0"
+                            title="Edit with a large editor and preview side by side"
                           >
-                            {editingSongId ? (
-                              <>
-                                <Check className="mr-2 h-4 w-4" />
-                                Done editing
-                              </>
-                            ) : (
-                              <>
-                                <Plus className="mr-2 h-4 w-4" />
-                                Add song
-                              </>
-                            )}
+                            <Maximize2 className="mr-1.5 h-4 w-4" />
+                            Focus mode
                           </Button>
                         </div>
+                        {renderPasteTextarea("pasted-tab-text", "min-h-[280px]")}
+                        {pastedTabError && <p className="text-sm text-red-600">{pastedTabError}</p>}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <span className="text-sm text-slate-500">
+                            {editingSongId
+                              ? "Preview updates as you type."
+                              : "The draft shows in the preview until you add it."}
+                          </span>
+                          {pasteActions}
+                        </div>
                       </div>
-                    </div>
                     )}
                   </CardContent>
                 </Card>
@@ -3213,6 +3295,95 @@ export default function ChordTransposer() {
           </Card>
         </DialogContent>
       </Dialog>
+
+      {isFocusMode && (
+        <div className="fixed inset-0 z-40 flex flex-col bg-slate-100" role="dialog" aria-label="Focus mode">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-base font-semibold text-slate-900">
+                {editingSong ? `Editing "${editingSong.song}"` : parsedPastedSong ? parsedPastedSong.song : "New song"}
+              </div>
+              <div className="text-sm text-slate-500">
+                {editingSong ? editingSong.artist : "Paste or type a chord sheet"} · Esc to exit
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 text-sm" role="tablist" aria-label="Preview">
+              {(
+                [
+                  { scope: "song", label: "This song" },
+                  { scope: "setlist", label: "Whole setlist" },
+                ] as const
+              ).map(option => (
+                <button
+                  key={option.scope}
+                  type="button"
+                  role="tab"
+                  aria-selected={focusPreviewScope === option.scope}
+                  onClick={() => setFocusPreviewScope(option.scope)}
+                  className={cn(
+                    "rounded-md px-3 py-1.5 font-medium transition-colors",
+                    focusPreviewScope === option.scope
+                      ? "bg-white text-slate-900 shadow-sm"
+                      : "text-slate-600 hover:text-slate-900"
+                  )}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="hidden items-center gap-2 text-sm text-slate-600 md:flex">
+                Size
+                <Slider
+                  min={6}
+                  max={20}
+                  step={0.5}
+                  value={[fontSize]}
+                  onValueChange={value => setFontSize(value[0])}
+                  className="w-24"
+                />
+                <span className="w-10 tabular-nums">{fontSize}pt</span>
+              </label>
+              {pasteActions}
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setIsFocusMode(false)}
+                title="Exit focus mode (Esc)"
+                aria-label="Exit focus mode"
+              >
+                <Minimize2 className="h-5 w-5" />
+              </Button>
+            </div>
+          </div>
+
+          {pastedTabError && (
+            <div className="border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-700">{pastedTabError}</div>
+          )}
+
+          <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-2 gap-4 p-4 lg:grid-cols-2 lg:grid-rows-1 sm:p-6">
+            {renderPasteTextarea("focus-tab-text", "h-full min-h-0 resize-none text-[15px] leading-7 shadow-sm")}
+            <div className="min-h-0 overflow-hidden rounded-md border border-slate-200 bg-slate-200 shadow-sm">
+              {pdfUrl ? (
+                <iframe src={pdfUrl} className="block h-full w-full" title="Focus preview" />
+              ) : (
+                <div className="flex h-full items-center justify-center px-6 text-center text-sm text-slate-500">
+                  {pastedTabText.trim() ? (
+                    <>
+                      <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                      Generating preview…
+                    </>
+                  ) : (
+                    "Start typing to see the preview."
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="border-t border-slate-200 bg-white px-4 py-5 sm:px-6 lg:px-8">
         <div className="mx-auto flex max-w-[1400px] flex-col items-center justify-between gap-1 text-sm text-slate-500 sm:flex-row">
