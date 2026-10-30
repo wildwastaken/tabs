@@ -21,6 +21,7 @@ import {
   isUltimateGuitarUrl,
   buildSendToTabsBookmarklet,
   decodeImportPayload,
+  type ImportedTabPayload,
   normalizeUltimateGuitarUrl,
   type UltimateGuitarTab,
 } from "../lib/ultimate-guitar"
@@ -219,8 +220,58 @@ function pluralize(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`
 }
 
+// Bridge exposed by the Mac app (desktop/preload.js). Requests go out from
+// the user's own Mac rather than our hosting provider's servers.
+interface TabsDesktopBridge {
+  fetchTabPage(url: string): Promise<{ ok: boolean; status: number; html: string }>
+  openTabPage(url: string): Promise<ImportedTabPayload | null>
+}
+
+declare global {
+  interface Window {
+    tabsDesktop?: TabsDesktopBridge
+  }
+}
+
+// Text read off the rendered page has no [ch] markup; detect chord lines ourselves.
+function importedTabToSong(payload: ImportedTabPayload): UltimateGuitarTab {
+  const song = payload.song?.trim() || "Untitled Song"
+  const artist = payload.artist?.trim() || "Unknown Artist"
+  let content = (payload.content || "").replace(/\r\n/g, "\n")
+  if (!content.includes("[ch]")) {
+    try {
+      content = parsePastedSong(`Title: ${song}\nArtist: ${artist}\n\n${content}`).chords
+    } catch {
+      // keep the raw text
+    }
+  }
+  return { song, artist, content }
+}
+
+async function fetchTabViaDesktopApp(
+  bridge: TabsDesktopBridge,
+  tabUrl: string
+): Promise<UltimateGuitarTab> {
+  try {
+    const page = await bridge.fetchTabPage(tabUrl)
+    const tab = page.ok ? extractTabFromHtml(page.html) : null
+    if (tab) return tab
+    console.warn("Direct page load failed, opening the page in a window:", page.status)
+  } catch (err) {
+    console.warn("Direct page load failed, opening the page in a window:", err)
+  }
+
+  const payload = await bridge.openTabPage(tabUrl)
+  if (!payload?.content) throw new Error("no chords found on the page")
+  return importedTabToSong(payload)
+}
+
 async function fetchUltimateGuitarTab(rawUrl: string): Promise<UltimateGuitarTab> {
   const tabUrl = normalizeUltimateGuitarUrl(rawUrl)
+  if (typeof window !== "undefined" && window.tabsDesktop) {
+    return fetchTabViaDesktopApp(window.tabsDesktop, tabUrl)
+  }
+
   let serverFailure = ""
 
   try {
@@ -520,6 +571,7 @@ export default function ChordTransposer() {
   const [savedSetlists, setSavedSetlists] = useState<SavedSetlist[]>([])
   const [savedSetlistSearch, setSavedSetlistSearch] = useState("")
   const [hasHydrated, setHasHydrated] = useState(false)
+  const [isDesktopApp, setIsDesktopApp] = useState(false)
 
   // Adding songs
   const [linkInput, setLinkInput] = useState("")
@@ -654,17 +706,7 @@ export default function ChordTransposer() {
 
     window.history.replaceState(null, "", window.location.pathname + window.location.search)
 
-    const songName = payload.song?.trim() || "Untitled Song"
-    const artist = payload.artist?.trim() || "Unknown Artist"
-    let chords = payload.content.replace(/\r\n/g, "\n")
-    if (!chords.includes("[ch]")) {
-      // Plain text copied from the rendered page: detect chord lines ourselves.
-      try {
-        chords = parsePastedSong(`Title: ${songName}\nArtist: ${artist}\n\n${chords}`).chords
-      } catch {
-        // keep the raw text
-      }
-    }
+    const { song: songName, artist, content: chords } = importedTabToSong(payload)
 
     const id = createId()
     setSongs(prev => [
@@ -691,6 +733,7 @@ export default function ChordTransposer() {
 
     applyWorkingSetlist(readStorage<WorkingSetlist>(WORKING_SETLIST_STORAGE_KEY))
     importSongFromHash()
+    setIsDesktopApp(Boolean(window.tabsDesktop))
     setHasHydrated(true)
 
     // Keep several open tabs of the app in sync (e.g. a song sent from
@@ -904,16 +947,20 @@ export default function ChordTransposer() {
     setLinkInput(failed.join("\n"))
 
     if (failed.length > 0) {
-      setIsBookmarkletOpen(true)
+      if (!isDesktopApp) setIsBookmarkletOpen(true)
       setError(
         `Couldn't load ${pluralize(failed.length, "link")}. ${
           added > 0 ? `Added ${pluralize(added, "song")}. ` : ""
-        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box. Ultimate Guitar may be blocking automatic downloads — use the "Send to tabs" button below, or paste the tab text.`
+        }${lastFailureReason ? `(${lastFailureReason}) ` : ""}Check the link${failed.length === 1 ? "" : "s"} left in the box. ${
+          isDesktopApp
+            ? "Try again, or paste the tab text."
+            : 'Ultimate Guitar may be blocking automatic downloads — use the "Send to tabs" button below, or paste the tab text.'
+        }`
       )
     } else {
       showNotice(`Added ${pluralize(added, "song")}`)
     }
-  }, [linkInput, showNotice])
+  }, [linkInput, showNotice, isDesktopApp])
 
   const addOrConfirmPastedSong = useCallback(() => {
     if (!pastedTabText.trim()) {
@@ -1709,66 +1756,68 @@ export default function ChordTransposer() {
                       </div>
                     </div>
 
-                    <div className="rounded-lg border border-slate-200 bg-slate-50">
-                      <button
-                        type="button"
-                        onClick={() => setIsBookmarkletOpen(prev => !prev)}
-                        className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-slate-700 hover:text-slate-900"
-                        aria-expanded={isBookmarkletOpen}
-                      >
-                        <span>Link not loading? Send songs straight from Ultimate Guitar</span>
-                        {isBookmarkletOpen ? (
-                          <ChevronUp className="h-4 w-4 flex-shrink-0" />
-                        ) : (
-                          <ChevronDown className="h-4 w-4 flex-shrink-0" />
-                        )}
-                      </button>
-                      {isBookmarkletOpen && (
-                        <div className="space-y-3 border-t border-slate-200 px-3 pb-3 pt-3 text-sm text-slate-600">
-                          <ol className="list-decimal space-y-1 pl-5">
-                            <li>
-                              Drag this button to your bookmarks bar:{" "}
-                              <a
-                                ref={node => {
-                                  node?.setAttribute("href", buildSendToTabsBookmarklet(window.location.origin))
+                    {!isDesktopApp && (
+                      <div className="rounded-lg border border-slate-200 bg-slate-50">
+                        <button
+                          type="button"
+                          onClick={() => setIsBookmarkletOpen(prev => !prev)}
+                          className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-slate-700 hover:text-slate-900"
+                          aria-expanded={isBookmarkletOpen}
+                        >
+                          <span>Link not loading? Send songs straight from Ultimate Guitar</span>
+                          {isBookmarkletOpen ? (
+                            <ChevronUp className="h-4 w-4 flex-shrink-0" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4 flex-shrink-0" />
+                          )}
+                        </button>
+                        {isBookmarkletOpen && (
+                          <div className="space-y-3 border-t border-slate-200 px-3 pb-3 pt-3 text-sm text-slate-600">
+                            <ol className="list-decimal space-y-1 pl-5">
+                              <li>
+                                Drag this button to your bookmarks bar:{" "}
+                                <a
+                                  ref={node => {
+                                    node?.setAttribute("href", buildSendToTabsBookmarklet(window.location.origin))
+                                  }}
+                                  draggable
+                                  onClick={e => {
+                                    e.preventDefault()
+                                    showNotice("Drag the \"Send to tabs\" button onto your bookmarks bar, then click it on an Ultimate Guitar song page.")
+                                  }}
+                                  className="ml-1 inline-flex cursor-grab items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground shadow-sm active:cursor-grabbing"
+                                >
+                                  <Music2 className="h-3.5 w-3.5" />
+                                  Send to tabs
+                                </a>
+                              </li>
+                              <li>Open any song on Ultimate Guitar like you normally would.</li>
+                              <li>Click <strong>Send to tabs</strong> in your bookmarks — the song is added here.</li>
+                            </ol>
+                            <p className="text-slate-500">
+                              On a phone, bookmark any page, then edit the bookmark and replace its address with this code:{" "}
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await navigator.clipboard.writeText(
+                                      buildSendToTabsBookmarklet(window.location.origin)
+                                    )
+                                    setBookmarkletCopied(true)
+                                    setTimeout(() => setBookmarkletCopied(false), 2000)
+                                  } catch {
+                                    setError("Couldn't copy to clipboard.")
+                                  }
                                 }}
-                                draggable
-                                onClick={e => {
-                                  e.preventDefault()
-                                  showNotice("Drag the \"Send to tabs\" button onto your bookmarks bar, then click it on an Ultimate Guitar song page.")
-                                }}
-                                className="ml-1 inline-flex cursor-grab items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-semibold text-primary-foreground shadow-sm active:cursor-grabbing"
+                                className="font-medium text-primary hover:underline"
                               >
-                                <Music2 className="h-3.5 w-3.5" />
-                                Send to tabs
-                              </a>
-                            </li>
-                            <li>Open any song on Ultimate Guitar like you normally would.</li>
-                            <li>Click <strong>Send to tabs</strong> in your bookmarks — the song is added here.</li>
-                          </ol>
-                          <p className="text-slate-500">
-                            On a phone, bookmark any page, then edit the bookmark and replace its address with this code:{" "}
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  await navigator.clipboard.writeText(
-                                    buildSendToTabsBookmarklet(window.location.origin)
-                                  )
-                                  setBookmarkletCopied(true)
-                                  setTimeout(() => setBookmarkletCopied(false), 2000)
-                                } catch {
-                                  setError("Couldn't copy to clipboard.")
-                                }
-                              }}
-                              className="font-medium text-primary hover:underline"
-                            >
-                              {bookmarkletCopied ? "Copied!" : "copy bookmark code"}
-                            </button>
-                          </p>
-                        </div>
-                      )}
-                    </div>
+                                {bookmarkletCopied ? "Copied!" : "copy bookmark code"}
+                              </button>
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     <Separator />
 
